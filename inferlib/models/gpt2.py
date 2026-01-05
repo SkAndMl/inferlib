@@ -101,7 +101,7 @@ class MLP(nn.Module):
         self.c_proj.SCALE_INIT = True
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.c_proj(F.gelu(self.c_fc(x)))
+        return self.c_proj(F.gelu(self.c_fc(x), approximate="tanh"))
 
 
 class Block(nn.Module):
@@ -135,7 +135,7 @@ class GPT2(nn.Module):
 
         self.h = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
         self.ln_f = LayerNorm(config)
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.lm_head.weight = self.wte.weight
 
         self.apply(self._init_weights)
@@ -146,7 +146,7 @@ class GPT2(nn.Module):
         use_kv_cache: bool = True,
         kv_caches: Dict[int, Tuple[Tensor, Tensor]] = None,
     ) -> Tuple[Tensor, Dict[str, Tuple[Tensor, Tensor]] | None]:
-        if use_kv_cache and kv_caches is None:
+        if kv_caches is None:
             kv_caches = {}
 
         _, T = x.shape
@@ -225,6 +225,9 @@ class GPT2(nn.Module):
         use_kv_cache: bool = True,
         kv_caches: Dict[int, Tuple[Tensor, Tensor]] = None,
     ):
+        assert max_tokens <= self.config.n_ctx, (
+            f"max_tokens ({max_tokens}) exceeded model's ctx length ({self.config.n_ctx})"
+        )
         # assume length is only 1 for now
         self.eval()
         with torch.inference_mode():
@@ -239,3 +242,14 @@ class GPT2(nn.Module):
                 x = torch.cat((x, next_tokens), dim=-1).to(logits.device)
 
         return x.tolist()
+
+
+if __name__ == "__main__":
+    from tiktoken import get_encoding
+
+    tokenizer = get_encoding("gpt2")
+    model = GPT2.from_pretrained("medium")
+    text = "Hi, how"
+    tokens = [tokenizer.encode(text)]
+    output_tokens = model.generate(tokens=tokens, max_tokens=10)
+    print(tokenizer.decode(output_tokens[0]))
