@@ -1,28 +1,10 @@
 import torch
 
-from dataclasses import dataclass
 from torch import nn, Tensor
 from torch.nn import functional as F
 from typing import Dict, Literal, Tuple
 
-
-@dataclass
-class ModelConfig:
-    attn_pdrop: float = 0.1
-    embd_pdrop: float = 0.1
-    initializer_range: float = 0.02
-    layer_norm_epsilon: float = 1e-05
-    n_ctx: int = 1024
-    n_embd: int = 1024
-    n_head: int = 16
-    n_layer: int = 24
-    n_positions: int = 1024
-    resid_pdrop: int = 0.1
-    vocab_size: int = 50257
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "ModelConfig":
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+from .common import ModelConfig
 
 
 class LayerNorm(nn.Module):
@@ -73,7 +55,7 @@ class MHA(nn.Module):
         v: Tensor = v.reshape(B, T, n_head, head_dim).transpose(1, 2)
 
         if use_kv_cache and kv_cache is not None:
-            k_old, v_old = kv_cache
+            k_old, v_old = kv_cache  # bsz, head_dim, seq_len, seq_len
             k = torch.cat([k_old, k], dim=2).to(k.device)
             v = torch.cat([v_old, v], dim=2).to(v.device)
 
