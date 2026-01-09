@@ -1,10 +1,20 @@
+if __name__ == "__main__" and (__package__ is None or __package__ == ""):
+    # Allow running this file directly (e.g., `python inferlib/models/gpt2.py`)
+    # by ensuring the repo root is on sys.path.
+    import os
+    import sys
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+
 import torch
 
 from torch import nn, Tensor
 from torch.nn import functional as F
 from typing import Dict, Literal, Tuple
 
-from .common import ModelConfig
+from inferlib.models.common import ModelConfig, PagedKVCache
 
 
 class LayerNorm(nn.Module):
@@ -25,12 +35,19 @@ class LayerNorm(nn.Module):
 class MHA(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
+
+        assert config.n_embd % config.n_head == 0
         self.cfg = config
+        self.head_dim = config.n_embd // config.n_head
+
         self.c_attn = nn.Linear(config.n_embd, config.n_embd * 3)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd)
         self.attn_drop = nn.Dropout(config.attn_pdrop)
 
         self.c_proj.SCALE_INIT = True  # for residual scaling
+        self.paged_kv_cache = None
+        if config.use_kv_cache:
+            self.paged_kv_cache = PagedKVCache(config)
 
         self.register_buffer(
             "mask",
@@ -40,39 +57,64 @@ class MHA(nn.Module):
             ),
         )
 
-    def forward(
-        self,
-        x: Tensor,
-        use_kv_cache: bool = True,
-        kv_cache: Tuple[Tensor, Tensor] = None,
-    ) -> Tensor:
+    def _reset_cache(self):
+        assert self.cfg.use_kv_cache
+        self.paged_kv_cache.reset()
+
+    def _online_attention(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
+        assert q.shape[2] == k.shape[2] == v.shape[2] == 1
+
+        denom = torch.zeros(size=(q.shape[0], self.cfg.n_head, 1, 1), device=q.device)
+        y = torch.zeros_like(q)
+        for i in range(self.paged_kv_cache.num_pages):
+            k_i, v_i = self.paged_kv_cache.get_kv_page(i)
+            S_i: Tensor = (q @ k_i.transpose(-2, -1)) / (
+                self.head_dim**0.5
+            )  # bsz, n_head, 1, page_size
+            P_i = S_i.exp()  # bsz, n_head, 1, page_size
+            d_i = P_i.sum(dim=-1, keepdim=True)  # bsz, n_head, 1, 1
+            y = (P_i @ v_i) / (denom + d_i) + (denom * y) / (denom + d_i)
+            denom += d_i
+
+        S_n: Tensor = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
+        P_n = S_n.exp()
+        d_n = P_n.sum(dim=-1, keepdim=True)
+        y = (P_n @ v) / (denom + d_n) + (denom * y) / (
+            denom + d_n
+        )  # bsz, n_head, 1, head_dim
+
+        self.paged_kv_cache.put_kv_page((k, v))
+        return y
+
+    def forward(self, x: Tensor, prefill: bool = False) -> Tensor:
         B, T, D = x.shape
         q_len, k_len = T, T
-        n_head, head_dim = self.cfg.n_head, D // self.cfg.n_head
+        n_head = self.cfg.n_head
         q, k, v = self.c_attn(x).split(D, dim=-1)
-        q: Tensor = q.reshape(B, T, n_head, head_dim).transpose(1, 2)
-        k: Tensor = k.reshape(B, T, n_head, head_dim).transpose(1, 2)
-        v: Tensor = v.reshape(B, T, n_head, head_dim).transpose(1, 2)
+        q: Tensor = q.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
+        k: Tensor = k.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
+        v: Tensor = v.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
 
-        if use_kv_cache and kv_cache is not None:
-            k_old, v_old = kv_cache  # bsz, head_dim, seq_len, seq_len
-            k = torch.cat([k_old, k], dim=2).to(k.device)
-            v = torch.cat([v_old, v], dim=2).to(v.device)
+        if self.cfg.use_kv_cache:
+            if prefill:
+                for i in range(k_len - 1):
+                    self.paged_kv_cache.put_kv_page(
+                        (k[..., i : i + 1, :], v[..., i : i + 1, :])
+                    )
+            y = self._online_attention(
+                q[..., -1:, :],
+                k[..., k_len - 1 : k_len, :],
+                v[..., k_len - 1 : k_len, :],
+            )
+        else:
+            attn_wts = q @ k.transpose(-2, -1) / (self.head_dim**0.5)  # B, H, N, N
+            attn_wts = attn_wts + self.mask[:, :, k_len - q_len : k_len, :k_len]
+            attn_wts = F.softmax(attn_wts, dim=-1)
+            attn_wts = self.attn_drop(attn_wts)
+            y = attn_wts @ v  # B, H, N, head_dim
 
-            k_len += k_old.shape[2]
-
-        attn_wts = q @ k.transpose(-2, -1) / (head_dim**0.5)  # B, H, N, N
-        attn_wts = attn_wts + self.mask[:, :, k_len - q_len : k_len, :k_len]
-        attn_wts = F.softmax(attn_wts, dim=-1)
-        attn_wts = self.attn_drop(attn_wts)
-
-        y = attn_wts @ v  # B, H, N, head_dim
-        y = y.transpose(1, 2).contiguous().view(B, T, D)
-
-        if use_kv_cache:
-            kv_cache = (k, v)
-
-        return self.c_proj(y), kv_cache
+        y = y.transpose(1, 2).contiguous().view(B, 1 if self.cfg.use_kv_cache else T, D)
+        return self.c_proj(y)
 
 
 class MLP(nn.Module):
@@ -95,16 +137,10 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config)
         self.resid_drop = nn.Dropout(p=config.resid_pdrop)
 
-    def forward(
-        self,
-        x: Tensor,
-        use_kv_cache: bool = False,
-        kv_cache: Tuple[Tensor, Tensor] = None,
-    ) -> Tensor:
-        attn_x, kv_cache = self.attn(self.ln_1(x), use_kv_cache, kv_cache)
-        x = x + self.resid_drop(attn_x)
+    def forward(self, x: Tensor, prefill: bool = False) -> Tensor:
+        x = x + self.resid_drop(self.attn(self.ln_1(x), prefill))
         x = x + self.resid_drop(self.mlp(self.ln_2(x)))
-        return x, kv_cache
+        return x
 
 
 class GPT2(nn.Module):
@@ -123,26 +159,16 @@ class GPT2(nn.Module):
         self.apply(self._init_weights)
 
     def forward(
-        self,
-        x: Tensor,
-        use_kv_cache: bool = True,
-        kv_caches: Dict[int, Tuple[Tensor, Tensor]] = None,
+        self, x: Tensor, cur_pos: int = 0, prefill: bool = False
     ) -> Tuple[Tensor, Dict[str, Tuple[Tensor, Tensor]] | None]:
-        if kv_caches is None:
-            kv_caches = {}
-
         _, T = x.shape
-        cur_pos = 0
-        if use_kv_cache and kv_caches.get(0, None) is not None:
-            cur_pos = kv_caches[0][0].shape[2]
         x = self.emb_drop(
             self.wte(x) + self.wpe(torch.arange(cur_pos, cur_pos + T).to(x.device))
         )
         for i, block in enumerate(self.h):
-            x, kv_cache = block(x, use_kv_cache, kv_caches.get(i, None))
-            kv_caches[i] = kv_cache
+            x = block(x, prefill)
 
-        return self.lm_head(self.ln_f(x)), kv_caches
+        return self.lm_head(self.ln_f(x))
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -189,23 +215,19 @@ class GPT2(nn.Module):
         self,
         *,
         x: Tensor,
-        use_kv_cache: bool = True,
-        kv_caches: Dict[int, Tuple[Tensor, Tensor]] = None,
     ):
         x_recent = x[:, -self.config.n_ctx :].clone()
-        logits, kv_caches = self(x_recent, use_kv_cache, kv_caches)
+        logits = self(x_recent, prefill=True)
         logits: Tensor = logits[:, -1:, :]
         next_tokens = logits.argmax(dim=-1)
         x = torch.cat((x, next_tokens), dim=-1).to(logits.device)
-        return x, kv_caches
+        return x
 
     def generate(
         self,
         *,
         tokens: list[list[int]],
         max_tokens: int = 200,
-        use_kv_cache: bool = True,
-        kv_caches: Dict[int, Tuple[Tensor, Tensor]] = None,
     ):
         assert max_tokens <= self.config.n_ctx, (
             f"max_tokens ({max_tokens}) exceeded model's ctx length ({self.config.n_ctx})"
@@ -214,16 +236,21 @@ class GPT2(nn.Module):
         self.eval()
         with torch.inference_mode():
             x = torch.tensor(tokens, device=self.wte.weight.device)
-            x, kv_caches = self._prefill(
-                x=x, use_kv_cache=use_kv_cache, kv_caches=kv_caches
-            )
-            for _ in range(max_tokens - 1):
+            prompt_len = x.shape[1]
+            x = self._prefill(x=x)
+            for pos in range(1, max_tokens):
                 x_last = x[:, -1:].clone()
-                logits, kv_caches = self(x_last, use_kv_cache, kv_caches)
+                logits = self(x_last, cur_pos=prompt_len + pos)
                 next_tokens = logits.argmax(dim=-1)  # b, 1
                 x = torch.cat((x, next_tokens), dim=-1).to(logits.device)
 
+            self._reset_cache()
+
         return x.tolist()
+
+    def _reset_cache(self):
+        for block in self.h:
+            block.attn._reset_cache()
 
 
 if __name__ == "__main__":

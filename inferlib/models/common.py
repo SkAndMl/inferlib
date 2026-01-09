@@ -17,8 +17,9 @@ class ModelConfig:
     n_positions: int = 1024
     resid_pdrop: int = 0.1
     vocab_size: int = 50257
-    use_kv_cache: bool = False
+    use_kv_cache: bool = True
     page_size: int = 256  # assume it to be 1/4th of n_ctx
+    bsz: int = 1
 
     @classmethod
     def from_dict(cls, data: dict) -> "ModelConfig":
@@ -107,3 +108,25 @@ class PagedKVCache:
         self._k_pages[self.max_page_idx]["num_filled"] += 1
         self._v_pages[self.max_page_idx]["num_filled"] += 1
         self._seq_len += 1
+
+    def reset(self):
+        self.max_page_idx = 0
+        self._seq_len = 0
+        shape = (
+            self.config.bsz,
+            self.config.n_head,
+            self.config.page_size,
+            self.head_dim,
+        )
+        self._k_pages: Dict[str, Any] = {
+            0: {
+                "page": torch.empty(size=shape),
+                "num_filled": 0,
+            }
+        }
+        self._v_pages: Dict[str, Any] = {
+            0: {
+                "page": torch.empty(size=shape),
+                "num_filled": 0,
+            }
+        }
