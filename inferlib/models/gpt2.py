@@ -64,26 +64,54 @@ class MHA(nn.Module):
     def _online_attention(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
         assert q.shape[2] == k.shape[2] == v.shape[2] == 1
 
-        denom = torch.zeros(size=(q.shape[0], self.cfg.n_head, 1, 1), device=q.device)
+        running_denom = torch.zeros(
+            size=(q.shape[0], self.cfg.n_head, 1, 1), device=q.device
+        )
+        running_max = torch.ones(
+            size=(q.shape[0], self.cfg.n_head, 1, 1), device=q.device
+        ) * float("-inf")
         y = torch.zeros_like(q)
+
         for i in range(self.paged_kv_cache.num_pages):
-            k_i, v_i = self.paged_kv_cache.get_kv_page(i)
+            k_i, v_i = self.paged_kv_cache.get_kv_page(page_idx=i)
             S_i: Tensor = (q @ k_i.transpose(-2, -1)) / (
                 self.head_dim**0.5
-            )  # bsz, n_head, 1, page_size
-            P_i = S_i.exp()  # bsz, n_head, 1, page_size
-            d_i = P_i.sum(dim=-1, keepdim=True)  # bsz, n_head, 1, 1
-            y = (P_i @ v_i) / (denom + d_i) + (denom * y) / (denom + d_i)
-            denom += d_i
+            )  # bsz, head_dim, 1, pg_size
+            max_i: Tensor = torch.max(
+                S_i, dim=-1, keepdim=True
+            ).values  # bsz, head_dim, 1, 1
+            P_i = (S_i - max_i).exp()  # bsz, head_dim, 1, pg_size
 
-        S_n: Tensor = (q @ k.transpose(-2, -1)) / (self.head_dim**0.5)
-        P_n = S_n.exp()
-        d_n = P_n.sum(dim=-1, keepdim=True)
-        y = (P_n @ v) / (denom + d_n) + (denom * y) / (
-            denom + d_n
-        )  # bsz, n_head, 1, head_dim
+            max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
+            P_i = (max_i - max_new).exp() * P_i
+            denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
+            denom_new = (running_max - max_new).exp() * running_denom + denom_i
+            y = ((running_denom * y * (running_max - max_new).exp()) / denom_new) + (
+                P_i @ v_i
+            ) / denom_new
+
+            # update running stats
+            running_denom = denom_new.clone()
+            running_max = max_new.clone()
+
+        S_i: Tensor = (q @ k.transpose(-2, -1)) / (
+            self.head_dim**0.5
+        )  # bsz, head_dim, 1, pg_size
+        max_i: Tensor = torch.max(
+            S_i, dim=-1, keepdim=True
+        ).values  # bsz, head_dim, 1, 1
+        P_i = (S_i - max_i).exp()  # bsz, head_dim, 1, pg_size
+
+        max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
+        P_i = (max_i - max_new).exp() * P_i
+        denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
+        denom_new = (running_max - max_new).exp() * running_denom + denom_i
+        y = ((running_denom * y * (running_max - max_new).exp()) / denom_new) + (
+            P_i @ v
+        ) / denom_new
 
         self.paged_kv_cache.put_kv_page((k, v))
+
         return y
 
     def forward(self, x: Tensor, prefill: bool = False) -> Tensor:
@@ -95,12 +123,13 @@ class MHA(nn.Module):
         k: Tensor = k.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
         v: Tensor = v.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
 
-        if self.cfg.use_kv_cache:
-            if prefill:
-                for i in range(k_len - 1):
-                    self.paged_kv_cache.put_kv_page(
-                        (k[..., i : i + 1, :], v[..., i : i + 1, :])
-                    )
+        if prefill and self.cfg.use_kv_cache:
+            for i in range(k_len):
+                self.paged_kv_cache.put_kv_page(
+                    (k[..., i : i + 1, :], v[..., i : i + 1, :])
+                )
+
+        if self.cfg.use_kv_cache and not prefill:
             y = self._online_attention(
                 q[..., -1:, :],
                 k[..., k_len - 1 : k_len, :],
@@ -113,7 +142,8 @@ class MHA(nn.Module):
             attn_wts = self.attn_drop(attn_wts)
             y = attn_wts @ v  # B, H, N, head_dim
 
-        y = y.transpose(1, 2).contiguous().view(B, 1 if self.cfg.use_kv_cache else T, D)
+        _seq = 1 if self.cfg.use_kv_cache and not prefill else T
+        y = y.transpose(1, 2).contiguous().view(B, _seq, D)
         return self.c_proj(y)
 
 
@@ -229,7 +259,7 @@ class GPT2(nn.Module):
         tokens: list[list[int]],
         max_tokens: int = 200,
     ):
-        assert max_tokens <= self.config.n_ctx, (
+        assert len(tokens[0]) + max_tokens <= self.config.n_ctx, (
             f"max_tokens ({max_tokens}) exceeded model's ctx length ({self.config.n_ctx})"
         )
         # assume length is only 1 for now
@@ -238,7 +268,7 @@ class GPT2(nn.Module):
             x = torch.tensor(tokens, device=self.wte.weight.device)
             prompt_len = x.shape[1]
             x = self._prefill(x=x)
-            for pos in range(1, max_tokens):
+            for pos in range(max_tokens - 1):
                 x_last = x[:, -1:].clone()
                 logits = self(x_last, cur_pos=prompt_len + pos)
                 next_tokens = logits.argmax(dim=-1)  # b, 1

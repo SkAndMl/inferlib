@@ -23,13 +23,14 @@ def test_logits_equivalence_full_forward():
     tokenizer = get_encoding("gpt2")
 
     gpt = GPT2.from_pretrained("small").to(device).eval()
+    gpt.config.use_kv_cache = False
     gpt_hf = GPT2Model.from_pretrained("gpt2").to(device).eval()
 
     text = "Hello"
     x = torch.tensor([tokenizer.encode(text)], dtype=torch.long, device=device)
 
     with torch.no_grad():
-        our_logits, _ = gpt(x, use_kv_cache=False)
+        our_logits = gpt(x)
         hf_logits, _ = hf_logits_from_gpt2model(gpt_hf, x, use_cache=False)
 
     torch.testing.assert_close(our_logits, hf_logits, rtol=1e-3, atol=1e-3)
@@ -40,6 +41,7 @@ def test_logits_equivalence_with_kv_cache_incremental():
     tokenizer = get_encoding("gpt2")
 
     gpt = GPT2.from_pretrained("small").to(device).eval()
+    gpt.config.use_kv_cache = True
     gpt_hf = GPT2Model.from_pretrained("gpt2").to(device).eval()
 
     text = "Hello, how are"
@@ -49,11 +51,9 @@ def test_logits_equivalence_with_kv_cache_incremental():
     x_last = x[:, -1:]
 
     with torch.no_grad():
-        our_logits_prefill, our_cache = gpt(x_prefill, use_kv_cache=True, kv_caches={})
+        _ = gpt(x_prefill, prefill=True)
 
-        our_logits_step, our_cache2 = gpt(
-            x_last, use_kv_cache=True, kv_caches=our_cache
-        )
+        our_logits_step = gpt(x_last, cur_pos=x.shape[1] - 1)
 
         hf_logits_prefill, hf_past = hf_logits_from_gpt2model(
             gpt_hf, x_prefill, use_cache=True
@@ -65,10 +65,3 @@ def test_logits_equivalence_with_kv_cache_incremental():
     torch.testing.assert_close(
         our_logits_step[:, -1, :], hf_logits_step[:, -1, :], rtol=1e-3, atol=1e-3
     )
-
-    for layer_idx in range(gpt.config.n_layer):
-        k_ours, v_ours = our_cache2[layer_idx]
-        k_hf, v_hf = hf_past2[layer_idx]
-
-        torch.testing.assert_close(k_ours, k_hf, rtol=1e-3, atol=1e-3)
-        torch.testing.assert_close(v_ours, v_hf, rtol=1e-3, atol=1e-3)
