@@ -1,0 +1,70 @@
+import torch
+
+from dataclasses import dataclass
+from torch import Tensor
+from typing import List, Tuple
+
+
+@dataclass
+class PagePool:
+    num_pages: int
+    num_layers: int
+    num_heads: int
+    page_size: int
+    head_dim: int
+    dtype: torch.dtype
+    device: torch.device
+
+    def __post_init__(self):
+        size = (
+            self.num_pages,
+            self.num_layers,
+            self.num_heads,
+            self.page_size,
+            self.head_dim,
+        )
+        self._key_pool = torch.empty(size=size, dtype=self.dtype, device=self.device)
+        self._value_pool = torch.empty(size=size, dtype=self.dtype, device=self.device)
+        self._free_page_ids = list(range(self.num_pages))
+
+    @property
+    def num_free(self) -> int:
+        return len(self._free_page_ids)
+
+    def alloc(self) -> int:
+        if self.num_free == 0:
+            return -1
+        return self._free_page_ids.pop(0)
+
+    def free(self, page_ids: List[int]):
+        if any(_ in self._free_page_ids for _ in page_ids):
+            raise ValueError()
+        self._free_page_ids.extend(page_ids)
+
+    def write(
+        self, page_id: int, layer_id: int, offset: int, kv: Tuple[Tensor, Tensor]
+    ):
+        assert page_id not in self._free_page_ids
+        assert layer_id < self.num_layers
+        assert offset < self.page_size
+
+        k, v = kv
+
+        assert k.shape == v.shape == (1, self.num_heads, 1, self.head_dim)
+
+        self._key_pool[page_id, layer_id, :, offset : offset + 1, :] = k[0]
+        self._value_pool[page_id, layer_id, :, offset : offset + 1, :] = v[0]
+
+    def read(
+        self, page_id: int, layer_id: int, length: int | None = None
+    ) -> Tuple[Tensor, Tensor]:
+        assert page_id not in self._free_page_ids
+        assert layer_id < self.num_layers
+
+        if length is None:
+            length = self.page_size
+
+        k = self._key_pool[page_id, layer_id, :, :length, :]
+        v = self._value_pool[page_id, layer_id, :, :length, :]
+
+        return k, v
