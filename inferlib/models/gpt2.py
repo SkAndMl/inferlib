@@ -13,9 +13,10 @@ import torch
 from dataclasses import dataclass
 from torch import nn, Tensor
 from torch.nn import functional as F
-from typing import Dict, Literal, Tuple
+from typing import Dict, List, Literal, Tuple
 
 from inferlib.cache import PagedKVCache, SequenceState
+from inferlib.util import generated_padded_batch
 
 
 @dataclass
@@ -81,7 +82,12 @@ class MHA(nn.Module):
         self._layer_id = _layer_id
 
     def _online_attention(
-        self, q: Tensor, k: Tensor, v: Tensor, cache: PagedKVCache, seq: SequenceState
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        cache: PagedKVCache,
+        sequence_states: List[SequenceState],
     ) -> Tensor:
         assert q.shape[2] == k.shape[2] == v.shape[2] == 1
 
@@ -93,7 +99,7 @@ class MHA(nn.Module):
         ) * float("-inf")
         y = torch.zeros_like(q)
 
-        for k_i, v_i in cache.read_pages(seq, self._layer_id):
+        for k_i, v_i in cache.read_pages(sequence_states, self._layer_id):
             S_i: Tensor = (q @ k_i.transpose(-2, -1)) / (
                 self.head_dim**0.5
             )  # bsz, head_dim, 1, pg_size
@@ -130,11 +136,15 @@ class MHA(nn.Module):
             P_i @ v
         ) / denom_new
 
-        cache.write(seq, self._layer_id, (k, v))
+        cache.write(sequence_states, self._layer_id, (k, v))
         return y
 
     def forward(
-        self, x: Tensor, cache: PagedKVCache, seq: SequenceState, prefill: bool = False
+        self,
+        x: Tensor,
+        cache: PagedKVCache,
+        sequence_states: List[SequenceState],
+        prefill: bool = False,
     ) -> Tensor:
         B, T, D = x.shape
         q_len, k_len = T, T
@@ -145,7 +155,7 @@ class MHA(nn.Module):
         v: Tensor = v.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
 
         if prefill and self.cfg.use_kv_cache:
-            cache.prefill(seq, self._layer_id, (k, v))
+            cache.prefill(sequence_states, self._layer_id, (k, v))
 
         if self.cfg.use_kv_cache and not prefill:
             y = self._online_attention(
@@ -153,7 +163,7 @@ class MHA(nn.Module):
                 k[..., k_len - 1 : k_len, :],
                 v[..., k_len - 1 : k_len, :],
                 cache=cache,
-                seq=seq,
+                sequence_states=sequence_states,
             )
         else:
             attn_wts = q @ k.transpose(-2, -1) / (self.head_dim**0.5)  # B, H, N, N
@@ -190,9 +200,15 @@ class Block(nn.Module):
         self._layer_id = _layer_id
 
     def forward(
-        self, x: Tensor, cache: PagedKVCache, seq: SequenceState, prefill: bool = False
+        self,
+        x: Tensor,
+        cache: PagedKVCache,
+        sequence_states: List[SequenceState],
+        prefill: bool = False,
     ) -> Tensor:
-        x = x + self.resid_drop(self.attn(self.ln_1(x), cache, seq, prefill))
+        x = x + self.resid_drop(
+            self.attn(self.ln_1(x), cache, sequence_states, prefill)
+        )
         x = x + self.resid_drop(self.mlp(self.ln_2(x)))
         return x
 
@@ -216,7 +232,7 @@ class GPT2(nn.Module):
         self,
         x: Tensor,
         cache: PagedKVCache,
-        seq: SequenceState,
+        sequence_states: List[SequenceState],
         cur_pos: int = 0,
         prefill: bool = False,
     ) -> Tuple[Tensor, Dict[str, Tuple[Tensor, Tensor]] | None]:
@@ -225,7 +241,7 @@ class GPT2(nn.Module):
             self.wte(x) + self.wpe(torch.arange(cur_pos, cur_pos + T).to(x.device))
         )
         for block in self.h:
-            x = block(x, cache, seq, prefill)
+            x = block(x, cache, sequence_states, prefill)
 
         return self.lm_head(self.ln_f(x))
 
@@ -270,9 +286,11 @@ class GPT2(nn.Module):
         model_instance.load_state_dict(sd, strict=False)
         return model_instance
 
-    def _prefill(self, *, x: Tensor, cache: PagedKVCache, seq: SequenceState):
+    def _prefill(
+        self, *, x: Tensor, cache: PagedKVCache, sequence_states: List[SequenceState]
+    ):
         x_recent = x[:, -self.config.n_ctx :].clone()
-        logits = self(x_recent, cache, seq, prefill=True)
+        logits = self(x_recent, cache, sequence_states, prefill=True)
         logits: Tensor = logits[:, -1:, :]
         next_tokens = logits.argmax(dim=-1)
         x = torch.cat((x, next_tokens), dim=-1).to(logits.device)
@@ -281,30 +299,38 @@ class GPT2(nn.Module):
     def generate(
         self,
         *,
-        tokens: list[list[int]],
+        sequences: list[list[int]],
         cache: PagedKVCache,
-        seq: SequenceState,
+        sequence_states: List[SequenceState],
         max_tokens: int = 200,
-        temperature: float = 0.9,
+        temperature: float = 0.1,
+        pad_token_id: int = 50256,
     ):
-        assert len(tokens[0]) + max_tokens <= self.config.n_ctx, (
-            f"max_tokens ({max_tokens}) exceeded model's ctx length ({self.config.n_ctx})"
-        )
+        for sequence in sequences:
+            assert len(sequence) + max_tokens <= self.config.n_ctx
+
         # assume length is only 1 for now
         self.eval()
         with torch.inference_mode():
-            x = torch.tensor(tokens, device=self.wte.weight.device)
+            x, starting_positions = generated_padded_batch(sequences, pad_token_id)
+            x = x.to(device=self.wte.weight.device)
             prompt_len = x.shape[1]
-            x = self._prefill(x=x, cache=cache, seq=seq)
+            x = self._prefill(x=x, cache=cache, sequence_states=sequence_states)
             for pos in range(max_tokens - 1):
                 x_last = x[:, -1:].clone()
-                logits: Tensor = self(x_last, cache, seq, cur_pos=prompt_len + pos)
-                probs = F.softmax(logits, dim=-1)
+                logits: Tensor = self(
+                    x_last, cache, sequence_states, cur_pos=prompt_len + pos
+                )
+                probs = F.softmax(logits / temperature, dim=-1)
 
                 next_tokens = torch.multinomial(probs[:, -1, :], 1)  # b, 1
                 x = torch.cat((x, next_tokens), dim=-1).to(logits.device)
 
-        return x.tolist()
+        decoded_sequences = x.tolist()
+        decoded_sequences = [
+            d[s:] for d, s in zip(decoded_sequences, starting_positions)
+        ]
+        return decoded_sequences
 
 
 if __name__ == "__main__":
@@ -312,11 +338,11 @@ if __name__ == "__main__":
     from inferlib.cache import PagePool
 
     tokenizer = get_encoding("gpt2")
-    model = GPT2.from_pretrained("large")
+    model = GPT2.from_pretrained("small")
 
     page_size = 16
 
-    seq = SequenceState(seq_id="s1")
+    sequence_states = [SequenceState(seq_id="s1"), SequenceState(seq_id="s2")]
     page_pool = PagePool(
         num_pages=128,
         num_layers=model.config.n_layer,
@@ -327,10 +353,19 @@ if __name__ == "__main__":
         device=torch.device("cpu"),
     )
     cache = PagedKVCache(
-        page_pool=page_pool, num_layers=model.config.n_head, page_size=page_size
+        page_pool=page_pool,
+        num_layers=model.config.n_head,
+        page_size=page_size,
+        device="cpu",
     )
 
     text = "Hi, how"
-    tokens = [tokenizer.encode(text)]
-    output_tokens = model.generate(tokens=tokens, max_tokens=50, cache=cache, seq=seq)
-    print(tokenizer.decode(output_tokens[0]))
+    sequences = [tokenizer.encode(text), tokenizer.encode(text)]
+    output_sequences = model.generate(
+        sequences=sequences, max_tokens=10, cache=cache, sequence_states=sequence_states
+    )
+
+    for i in range(len(output_sequences)):
+        print(f"Seq id: {sequence_states[i].seq_id}")
+        print(f"Output: {tokenizer.decode(output_sequences[i])}")
+        print("=" * 20)
