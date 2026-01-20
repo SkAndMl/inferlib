@@ -114,3 +114,7 @@ class PagedKVCache:
                 torch.stack(k_pages, dim=0).to(self.device),
                 torch.stack(v_pages, dim=0).to(self.device),
             )
+
+    def free_pages(self, sequence_states: List[SequenceState]):
+        for sequence_state in sequence_states:
+            self.page_pool.free(sequence_state.page_ids)

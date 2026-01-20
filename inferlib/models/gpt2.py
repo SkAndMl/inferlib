@@ -330,6 +330,8 @@ class GPT2(nn.Module):
         decoded_sequences = [
             d[s:] for d, s in zip(decoded_sequences, starting_positions)
         ]
+
+        cache.free_pages(sequence_states)
         return decoded_sequences
 
 
