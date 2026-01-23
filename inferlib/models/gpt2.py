@@ -15,7 +15,8 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 from typing import Dict, List, Literal, Tuple
 
-from inferlib.cache import PagedKVCache, SequenceState
+from inferlib.cache import PagedKVCache
+from inferlib.schema.sequence_state import SequenceState
 from inferlib.util import generated_padded_batch
 
 
@@ -356,7 +357,7 @@ if __name__ == "__main__":
     )
     cache = PagedKVCache(
         page_pool=page_pool,
-        num_layers=model.config.n_head,
+        num_layers=model.config.n_layer,
         page_size=page_size,
         device="cpu",
     )

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from torch import Tensor
 from typing import Iterator, List, Tuple
 
-from .models import SequenceState
+from inferlib.schema.sequence_state import SequenceState
 from .page_pool import PagePool
 
 

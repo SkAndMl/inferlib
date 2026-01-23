@@ -4,17 +4,21 @@ from asyncio import Future
 from dataclasses import dataclass
 from typing import Callable, Generic, TypeVar
 
+from inferlib.schema.payload import Payload
+from inferlib.schema.sequence_state import SequenceState
+
 T = TypeVar("T")
 R = TypeVar("R")
 
 
 @dataclass
 class QueueItem(Generic[T, R]):
-    payload: T
+    payload: Payload
+    sequence_state: SequenceState
     fut: Future[R]
 
 
-class Scheduler(Generic[T, R]):
+class FCFSScheduler(Generic[T, R]):
     def __init__(
         self,
         fn_to_call: Callable,
@@ -51,11 +55,10 @@ class Scheduler(Generic[T, R]):
 
                 self._queue.task_done()
 
-    async def submit(self, payload: T):
+    async def submit(self, payload: Payload, sequence_state: SequenceState):
         loop = asyncio.get_running_loop()
         fut: Future[R] = loop.create_future()
-        # TODO: input processor to process
-        queue_item = QueueItem(payload=payload, fut=fut)
+        queue_item = QueueItem(payload=payload, sequence_state=sequence_state, fut=fut)
         await self._queue.put(queue_item)
         return await fut
 
@@ -67,7 +70,6 @@ class Scheduler(Generic[T, R]):
             payloads = [item.payload for item in batch]
             try:
                 results = await asyncio.to_thread(self._fn, payloads)
-                # TODO: output processor to process the results
                 if len(batch) != len(results):
                     raise RuntimeError()
 
