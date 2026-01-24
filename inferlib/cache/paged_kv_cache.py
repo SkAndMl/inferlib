@@ -16,7 +16,7 @@ class PagedKVCache:
     page_size: int
     device: torch.device
 
-    def _prefill_single(
+    def _prefill_one(
         self, sequence_state: SequenceState, layer_id: int, kv: Tuple[Tensor, Tensor]
     ):
         k, v = kv  # 1, num_heads, some_len, head_dim
@@ -51,7 +51,7 @@ class PagedKVCache:
     ):
         assert kv[0].shape[0] == len(sequence_states)
         for i in range(len(sequence_states)):
-            self._prefill_single(
+            self._prefill_one(
                 sequence_states[i],
                 layer_id,
                 (kv[0][i : i + 1, ...], kv[1][i : i + 1, ...]),
@@ -102,18 +102,14 @@ class PagedKVCache:
                 if sequence_states[0].seq_len % self.page_size == 0:
                     length = self.page_size
                 else:
-                    length = sequence_states[0].seq_len
-            k_pages, v_pages = [], []
-            for seq in sequence_states:
-                page_id = seq.page_ids[page_idx]
-                k, v = self.page_pool.read(page_id, layer_id, length)
-                k_pages.append(k)
-                v_pages.append(v)
-
-            yield (
-                torch.stack(k_pages, dim=0),
-                torch.stack(v_pages, dim=0),
+                    length = sequence_states[0].seq_len % self.page_size
+            page_ids = torch.tensor(
+                [seq.page_ids[page_idx] for seq in sequence_states],
+                dtype=torch.long,
+                device=self.page_pool.device,
             )
+            k, v = self.page_pool.read_many(page_ids, layer_id, length)
+            yield (k, v)
 
     def free_pages(self, sequence_states: List[SequenceState]):
         for sequence_state in sequence_states:

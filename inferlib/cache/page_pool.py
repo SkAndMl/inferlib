@@ -68,3 +68,13 @@ class PagePool:
         v = self._value_pool[page_id, layer_id, :, :length, :]
 
         return k, v
+
+    def read_many(
+        self, page_ids: Tensor, layer_id: int, length: int | None = None
+    ) -> Tuple[Tensor, Tensor]:
+        if length is None:
+            length = self.page_size
+
+        k = self._key_pool.index_select(0, page_ids)[:, layer_id, :, :length, :]
+        v = self._value_pool.index_select(0, page_ids)[:, layer_id, :, :length, :]
+        return k, v
