@@ -1,5 +1,7 @@
 import torch
 
+from functools import partial
+
 from inferlib.cache import PagedKVCache, PagePool
 from inferlib.models import GPT2
 from inferlib.scheduler import FCFSScheduler
@@ -16,10 +18,10 @@ class InferlibEngine:
     ):
         self._token_processor = TokenProcessor()
         self._llm = GPT2.from_pretrained("small")
-        self._scheduler = FCFSScheduler(fn_to_call=self._llm.generate)
         self._page_pool = PagePool(
             num_pages=num_pages,
             page_size=page_size,
+            num_layers=self._llm.config.n_layer,
             num_heads=self._llm.config.n_head,
             dtype=torch.float32,
             head_dim=self._llm.config.n_embd // self._llm.config.n_head,
@@ -30,6 +32,9 @@ class InferlibEngine:
             num_layers=self._llm.config.n_layer,
             page_size=page_size,
             device="cpu",
+        )
+        self._scheduler = FCFSScheduler(
+            fn_to_call=partial(self._llm.generate, cache=self._cache)
         )
 
     async def start(self):

@@ -67,9 +67,16 @@ class FCFSScheduler(Generic[T, R]):
             batch: list[QueueItem] = [
                 await self._queue.get() for _ in range(self._batch_size)
             ]
-            payloads = [item.payload for item in batch]
+            input_token_ids = [item.payload.input_token_ids for item in batch]
+            sequence_states = [item.sequence_state for item in batch]
             try:
-                results = await asyncio.to_thread(self._fn, payloads)
+                results = await asyncio.to_thread(
+                    self._fn,
+                    sequences=input_token_ids,
+                    sequence_states=sequence_states,
+                    max_tokens=10,
+                    temperature=1.0,
+                )
                 if len(batch) != len(results):
                     raise RuntimeError()
 

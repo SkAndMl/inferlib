@@ -11,11 +11,8 @@ class TokenProcessor:
         self._tokenizer = tiktoken.get_encoding("gpt2")
 
     def encode(self, payload: Payload) -> tuple[list[int]]:
-        assert "chat_id" in payload
-        assert "message" in payload
-
-        payload.input_token_ids = self._tokenizer.encode(payload["message"])
-        sequence_state = SequenceState(seq_id=payload["chat_id"])
+        payload.input_token_ids = self._tokenizer.encode(payload.message)
+        sequence_state = SequenceState(seq_id=payload.chat_id)
 
         return sequence_state
 
