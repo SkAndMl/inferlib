@@ -64,34 +64,32 @@ class PagedKVCache:
             return True
         return False
 
-    def _write_one(
-        self, sequence_state: SequenceState, layer_id: int, kv: Tuple[Tensor, Tensor]
-    ):
-        if layer_id == 0 and self._new_page_needed(sequence_state):
-            sequence_state.page_ids.append(self.page_pool.alloc())
-
-        self.page_pool.write(
-            sequence_state.page_ids[-1],
-            layer_id,
-            sequence_state.seq_len % self.page_size,
-            kv,
-        )
-
-        if layer_id == self.num_layers - 1:
-            sequence_state.seq_len += 1
-
     def write(
         self,
         sequence_states: List[SequenceState],
         layer_id: int,
         kv: Tuple[Tensor, Tensor],
     ):
-        for i in range(len(sequence_states)):
-            self._write_one(
-                sequence_states[i],
-                layer_id,
-                (kv[0][i : i + 1, ...], kv[1][i : i + 1, ...]),
-            )
+        if layer_id == 0:
+            for seq in sequence_states:
+                if self._new_page_needed(seq):
+                    seq.page_ids.append(self.page_pool.alloc())
+
+        page_ids = torch.tensor(
+            [seq.page_ids[-1] for seq in sequence_states],
+            dtype=torch.long,
+            device=self.page_pool.device,
+        )
+        offsets = torch.tensor(
+            [seq.seq_len % self.page_size for seq in sequence_states],
+            dtype=torch.long,
+            device=self.page_pool.device,
+        )
+        self.page_pool.write_many(page_ids, layer_id, offsets, kv)
+
+        if layer_id == self.num_layers - 1:
+            for seq in sequence_states:
+                seq.seq_len += 1
 
     def read_pages(
         self, sequence_states: List[SequenceState], layer_id: int

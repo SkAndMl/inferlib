@@ -55,6 +55,21 @@ class PagePool:
         self._key_pool[page_id, layer_id, :, offset : offset + 1, :] = k[0]
         self._value_pool[page_id, layer_id, :, offset : offset + 1, :] = v[0]
 
+    def write_many(
+        self,
+        page_ids: Tensor,
+        layer_id: int,
+        offsets: Tensor,
+        kv: Tuple[Tensor, Tensor],
+    ):
+        k, v = kv
+        assert (
+            k.shape == v.shape == (page_ids.shape[0], self.num_heads, 1, self.head_dim)
+        )
+
+        self._key_pool[page_ids, layer_id, :, offsets, :] = k.squeeze(2)
+        self._value_pool[page_ids, layer_id, :, offsets, :] = v.squeeze(2)
+
     def read(
         self, page_id: int, layer_id: int, length: int | None = None
     ) -> Tuple[Tensor, Tensor]:
