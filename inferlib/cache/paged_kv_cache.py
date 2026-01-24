@@ -8,6 +8,8 @@ from typing import Iterator, List, Tuple
 from inferlib.schema.sequence_state import SequenceState
 from .page_pool import PagePool
 
+# TODO: assumes alloc always returns a valid page id. should wait if returned page_id is -1
+
 
 @dataclass
 class PagedKVCache:
@@ -16,33 +18,6 @@ class PagedKVCache:
     page_size: int
     device: torch.device
 
-    def _prefill_one(
-        self, sequence_state: SequenceState, layer_id: int, kv: Tuple[Tensor, Tensor]
-    ):
-        k, v = kv  # 1, num_heads, some_len, head_dim
-        num_tokens = k.shape[2]
-        if len(sequence_state.page_ids) == 0:
-            assert layer_id == 0
-            pages_needed = math.ceil(num_tokens / self.page_size)
-            # TODO: check for -1, for now assume all are valid ids
-            sequence_state.page_ids = [
-                self.page_pool.alloc() for _ in range(pages_needed)
-            ]
-
-        for i, page_id in enumerate(sequence_state.page_ids):
-            length = self.page_size
-            if page_id == sequence_state.page_ids[-1]:
-                if num_tokens % self.page_size != 0:
-                    length = num_tokens % self.page_size
-            for token_offset in range(length):
-                token_position = i * self.page_size + token_offset
-                _k = k[:, :, token_position : token_position + 1, :]
-                _v = v[:, :, token_position : token_position + 1, :]
-                self.page_pool.write(page_id, layer_id, token_offset, (_k, _v))
-
-        if layer_id == self.num_layers - 1:
-            sequence_state.seq_len = num_tokens
-
     def prefill(
         self,
         sequence_states: List[SequenceState],
@@ -50,12 +25,34 @@ class PagedKVCache:
         kv: Tuple[Tensor, Tensor],
     ):
         assert kv[0].shape[0] == len(sequence_states)
-        for i in range(len(sequence_states)):
-            self._prefill_one(
-                sequence_states[i],
-                layer_id,
-                (kv[0][i : i + 1, ...], kv[1][i : i + 1, ...]),
+        k, v = kv
+        num_tokens = k.shape[2]
+
+        if len(sequence_states[0].page_ids) == 0:
+            assert layer_id == 0
+            pages_needed = math.ceil(num_tokens / self.page_size)
+            for seq in sequence_states:
+                seq.page_ids = [self.page_pool.alloc() for _ in range(pages_needed)]
+
+        num_pages = len(sequence_states[0].page_ids)
+        for page_idx in range(num_pages):
+            page_ids = torch.tensor(
+                [seq.page_ids[page_idx] for seq in sequence_states],
+                dtype=torch.long,
+                device=self.page_pool.device,
             )
+            length = self.page_size
+            if page_idx == num_pages - 1 and num_tokens % self.page_size != 0:
+                length = num_tokens % self.page_size
+
+            _k = k[:, :, page_idx * self.page_size : (page_idx + 1) * self.page_size, :]
+            _v = v[:, :, page_idx * self.page_size : (page_idx + 1) * self.page_size, :]
+            _k, _v = _k[..., :length, :], _v[..., :length, :]
+            self.page_pool.write_page(page_ids, layer_id, (_k, _v))
+
+        if layer_id == self.num_layers - 1:
+            for seq in sequence_states:
+                seq.seq_len = num_tokens
 
     def _new_page_needed(self, seq: SequenceState) -> bool:
         if seq.seq_len == 0:

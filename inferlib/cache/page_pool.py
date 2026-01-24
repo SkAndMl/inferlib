@@ -70,6 +70,20 @@ class PagePool:
         self._key_pool[page_ids, layer_id, :, offsets, :] = k.squeeze(2)
         self._value_pool[page_ids, layer_id, :, offsets, :] = v.squeeze(2)
 
+    def write_page(self, page_ids: Tensor, layer_id: int, kv: Tuple[Tensor, Tensor]):
+        # does not support starting from an offset yet
+        # wrote this to vectorize prefill in kv_cache for now
+        k, v = kv
+        length = k.shape[2]
+        assert (
+            k.shape
+            == v.shape
+            == (page_ids.shape[0], self.num_heads, length, self.head_dim)
+        )
+
+        self._key_pool[page_ids, layer_id, :, :length, :] = k
+        self._value_pool[page_ids, layer_id, :, :length, :] = v
+
     def read(
         self, page_id: int, layer_id: int, length: int | None = None
     ) -> Tuple[Tensor, Tensor]:
