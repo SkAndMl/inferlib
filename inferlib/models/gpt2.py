@@ -34,7 +34,7 @@ class ModelConfig:
     resid_pdrop: int = 0.1
     vocab_size: int = 50257
     use_kv_cache: bool = True
-    page_size: int = 256  # assume it to be 1/4th of n_ctx
+    page_size: int = 16
     bsz: int = 1
 
     @classmethod
@@ -93,52 +93,60 @@ class MHA(nn.Module):
         assert q.shape[2] == k.shape[2] == v.shape[2] == 1
 
         running_denom = torch.zeros(
-            size=(q.shape[0], self.cfg.n_head, 1, 1), device=q.device
+            size=(q.shape[0], self.cfg.n_head, 1, 1),
+            device=q.device,
+            dtype=torch.float32,
         )
         running_max = torch.ones(
-            size=(q.shape[0], self.cfg.n_head, 1, 1), device=q.device
+            size=(q.shape[0], self.cfg.n_head, 1, 1),
+            device=q.device,
+            dtype=torch.float32,
         ) * float("-inf")
-        y = torch.zeros_like(q)
+        y = torch.zeros_like(q, dtype=torch.float32)
+
+        qf = q.to(torch.float32)
+        kf_cur = k.to(torch.float32)
+        vf_cur = v.to(torch.float32)
 
         for k_i, v_i in cache.read_pages(sequence_states, self._layer_id):
-            S_i: Tensor = (q @ k_i.transpose(-2, -1)) / (
+            kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
+
+            S_i: Tensor = (qf @ kf.transpose(-2, -1)) / (
                 self.head_dim**0.5
             )  # bsz, head_dim, 1, pg_size
             max_i: Tensor = torch.max(
                 S_i, dim=-1, keepdim=True
             ).values  # bsz, head_dim, 1, 1
-            P_i = (S_i - max_i).exp()  # bsz, head_dim, 1, pg_size
 
             max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
-            P_i = (max_i - max_new).exp() * P_i
+            P_i = (S_i - max_new).exp()
             denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
-            denom_new = (running_max - max_new).exp() * running_denom + denom_i
-            y = ((running_denom * y * (running_max - max_new).exp()) / denom_new) + (
-                P_i @ v_i
-            ) / denom_new
 
-            # update running stats
-            running_denom = denom_new.clone()
-            running_max = max_new.clone()
+            alpha = (running_max - max_new).exp()
+            running_denom = alpha * running_denom + denom_i
+            y = y * alpha + (P_i @ vf)
 
-        S_i: Tensor = (q @ k.transpose(-2, -1)) / (
+            # update max
+            running_max = max_new
+
+        S_i: Tensor = (qf @ kf_cur.transpose(-2, -1)) / (
             self.head_dim**0.5
         )  # bsz, head_dim, 1, pg_size
         max_i: Tensor = torch.max(
             S_i, dim=-1, keepdim=True
         ).values  # bsz, head_dim, 1, 1
-        P_i = (S_i - max_i).exp()  # bsz, head_dim, 1, pg_size
 
         max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
-        P_i = (max_i - max_new).exp() * P_i
+        P_i = (S_i - max_new).exp()
         denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
-        denom_new = (running_max - max_new).exp() * running_denom + denom_i
-        y = ((running_denom * y * (running_max - max_new).exp()) / denom_new) + (
-            P_i @ v
-        ) / denom_new
+
+        alpha = (running_max - max_new).exp()
+        running_denom = alpha * running_denom + denom_i
+        y = y * alpha + (P_i @ vf_cur)
+        y /= running_denom
 
         cache.write(sequence_states, self._layer_id, (k, v))
-        return y
+        return y.to(q.dtype)
 
     def forward(
         self,
