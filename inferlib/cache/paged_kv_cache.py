@@ -111,8 +111,8 @@ class PagedKVCache:
                 v_pages.append(v)
 
             yield (
-                torch.stack(k_pages, dim=0).to(self.device),
-                torch.stack(v_pages, dim=0).to(self.device),
+                torch.stack(k_pages, dim=0),
+                torch.stack(v_pages, dim=0),
             )
 
     def free_pages(self, sequence_states: List[SequenceState]):
