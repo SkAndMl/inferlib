@@ -1,0 +1,93 @@
+import asyncio
+
+from asyncio import Future
+from dataclasses import dataclass
+from typing import Callable, Generic, TypeVar
+
+from inferlib.schema.payload import Payload
+from inferlib.schema.sequence_state import SequenceState
+
+T = TypeVar("T")
+R = TypeVar("R")
+
+
+@dataclass
+class QueueItem(Generic[T, R]):
+    payload: Payload
+    sequence_state: SequenceState
+    fut: Future[R]
+
+
+class FCFSScheduler(Generic[T, R]):
+    def __init__(
+        self,
+        fn_to_call: Callable,
+        batch_size: int = 4,
+        queue_size: int = 100,
+    ):
+        self._queue: asyncio.Queue[QueueItem[T, R]] = asyncio.Queue(maxsize=queue_size)
+        self._fn = fn_to_call
+        self._batch_size = batch_size
+        self._task = None
+        self._lock = asyncio.Lock()
+
+    async def start(self):
+        async with self._lock:
+            if self._task is None or self._task.done():
+                self._task = asyncio.create_task(self._worker_loop())
+
+    async def stop(self):
+        async with self._lock:
+            if self._task is None:
+                return
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+            self._task = None
+
+            while not self._queue.empty():
+                item = self._queue.get_nowait()
+                if not item.fut.done():
+                    item.fut.set_exception(asyncio.CancelledError("Scheduler stopped"))
+
+                self._queue.task_done()
+
+    async def submit(self, payload: Payload, sequence_state: SequenceState):
+        loop = asyncio.get_running_loop()
+        fut: Future[R] = loop.create_future()
+        queue_item = QueueItem(payload=payload, sequence_state=sequence_state, fut=fut)
+        await self._queue.put(queue_item)
+        return await fut
+
+    async def _worker_loop(self):
+        while True:
+            batch: list[QueueItem] = [
+                await self._queue.get() for _ in range(self._batch_size)
+            ]
+            input_token_ids = [item.payload.input_token_ids for item in batch]
+            sequence_states = [item.sequence_state for item in batch]
+            try:
+                results = await asyncio.to_thread(
+                    self._fn,
+                    sequences=input_token_ids,
+                    sequence_states=sequence_states,
+                    max_tokens=10,
+                    temperature=1.0,
+                )
+                if len(batch) != len(results):
+                    raise RuntimeError()
+
+            except Exception as e:
+                for item in batch:
+                    if not item.fut.done():
+                        item.fut.set_exception(e)
+            else:
+                for item, result in zip(batch, results):
+                    if not item.fut.done():
+                        item.fut.set_result(result)
+            finally:
+                for _ in batch:
+                    self._queue.task_done()
