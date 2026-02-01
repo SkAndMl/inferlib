@@ -18,7 +18,14 @@ class Sequence:
     last_token_id: int = -1
     temperature: float = 0.1
     max_tokens: int = 200
+    eos_token_id: int
 
     @property
     def sequence_length(self) -> int:
         return len(self.prompt_tokens) + len(self.completion_tokens)
+
+    def is_finished(self) -> bool:
+        return (
+            self.last_token_id == self.eos_token_id
+            or len(self.completion_tokens) == self.max_tokens
+        )
