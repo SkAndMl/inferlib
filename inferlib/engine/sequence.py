@@ -1,0 +1,24 @@
+from dataclasses import dataclass
+from enum import Enum, auto
+
+
+class SequenceState(Enum):
+    WAITING = auto()
+    RUNNING = auto()
+    FINISHED = auto()
+
+
+@dataclass
+class Sequence:
+    s_id: int
+    state: SequenceState
+    prompt_tokens: list[int]
+    completion_tokens: list[int]
+    page_ids: list[int]
+    last_token_id: int = -1
+    temperature: float = 0.1
+    max_tokens: int = 200
+
+    @property
+    def sequence_length(self) -> int:
+        return len(self.prompt_tokens) + len(self.completion_tokens)
