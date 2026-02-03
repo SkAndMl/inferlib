@@ -59,12 +59,13 @@ class PagePool:
         return k, v
 
 
+@dataclass
 class PageManager:
     page_pool: PagePool
     page_table: dict[int, list[int]]
 
     def __post_init__(self):
-        self.free_pages = deque(range(self.page_pool.num_pages))
+        self._free_pages = deque(range(self.page_pool.num_pages))
         self.page_size = self.page_pool.page_size
 
     def can_allocate(self, s_id: int, num_pages: int) -> bool:
@@ -75,18 +76,18 @@ class PageManager:
         those pages for the sequence by moving the page_ids
         from `free_pages` to `allocated_pages`
         """
-        if len(self.free_pages) < num_pages:
+        if len(self._free_pages) < num_pages:
             return False
 
         if s_id not in self.page_table:
             self.page_table[s_id] = []
 
-        page_ids = [self.free_pages.popleft() for _ in range(num_pages)]
-        self.page_table[s_id] = page_ids
+        page_ids = [self._free_pages.popleft() for _ in range(num_pages)]
+        self.page_table[s_id].extend(page_ids)
         return True
 
     def free(self, s_id: int):
-        self.free_pages.extend(self.page_table.pop(s_id))
+        self._free_pages.extend(self.page_table.pop(s_id))
 
     def write(
         self,
@@ -104,9 +105,9 @@ class PageManager:
     def read_pages(
         self, sequence: Sequence, layer_id: int
     ) -> Iterator[tuple[Tensor, Tensor]]:
-        for page_id in sequence.page_ids:
+        for page_id in self.page_table[sequence.s_id]:
             length = self.page_size
-            if page_id == sequence.page_ids[-1]:
+            if page_id == self.page_table[sequence.s_id][-1]:
                 rem = sequence.sequence_length % self.page_size
                 length = self.page_size if rem == 0 else rem
 
