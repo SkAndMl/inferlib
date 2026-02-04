@@ -61,12 +61,26 @@ class PagePool:
 
 @dataclass
 class PageManager:
-    page_pool: PagePool
-    page_table: dict[int, list[int]]
+    num_pages: int
+    num_layers: int
+    num_heads: int
+    page_size: int
+    head_dim: int
+    dtype: torch.dtype
+    device: torch.device
 
     def __post_init__(self):
-        self._free_pages = deque(range(self.page_pool.num_pages))
-        self.page_size = self.page_pool.page_size
+        self._page_pool = PagePool(
+            num_pages=self.num_pages,
+            num_layers=self.num_layers,
+            num_heads=self.num_heads,
+            page_size=self.page_size,
+            head_dim=self.head_dim,
+            dtype=self.dtype,
+            device=self.device,
+        )
+        self._page_table: dict[int, list[int]] = {}
+        self._free_pages = deque(range(self._page_pool.num_pages))
 
     def can_allocate(self, s_id: int, num_pages: int) -> bool:
         """
@@ -79,15 +93,15 @@ class PageManager:
         if len(self._free_pages) < num_pages:
             return False
 
-        if s_id not in self.page_table:
-            self.page_table[s_id] = []
+        if s_id not in self._page_table:
+            self._page_table[s_id] = []
 
         page_ids = [self._free_pages.popleft() for _ in range(num_pages)]
-        self.page_table[s_id].extend(page_ids)
+        self._page_table[s_id].extend(page_ids)
         return True
 
     def free(self, s_id: int):
-        self._free_pages.extend(self.page_table.pop(s_id))
+        self._free_pages.extend(self._page_table.pop(s_id))
 
     def write(
         self,
@@ -95,8 +109,8 @@ class PageManager:
         layer_id: int,
         kv: tuple[Tensor, Tensor],
     ):
-        self.page_pool.write(
-            self.page_table[sequence.s_id][-1],
+        self._page_pool.write(
+            self._page_table[sequence.s_id][-1],
             layer_id,
             sequence.sequence_length % self.page_size,
             kv,
@@ -105,18 +119,18 @@ class PageManager:
     def read_pages(
         self, sequence: Sequence, layer_id: int
     ) -> Iterator[tuple[Tensor, Tensor]]:
-        for page_id in self.page_table[sequence.s_id]:
+        for page_id in self._page_table[sequence.s_id]:
             length = self.page_size
-            if page_id == self.page_table[sequence.s_id][-1]:
+            if page_id == self._page_table[sequence.s_id][-1]:
                 rem = sequence.sequence_length % self.page_size
                 length = self.page_size if rem == 0 else rem
 
-            yield self.page_pool.read(page_id, layer_id, length)
+            yield self._page_pool.read(page_id, layer_id, length)
 
     def _prefill_one(
         self, sequence: Sequence, layer_id: int, kv: tuple[Tensor, Tensor]
     ):
-        page_ids = self.page_table[sequence.s_id]
+        page_ids = self._page_table[sequence.s_id]
         k, v = kv
         for i, page_id in enumerate(page_ids):
             length = self.page_size
@@ -127,7 +141,7 @@ class PageManager:
             _k = k[:, i * self.page_size : (i + 1) * self.page_size, :]
             _v = v[:, i * self.page_size : (i + 1) * self.page_size, :]
             _k, _v = _k[:, :length, :], _v[:, :length, :]
-            self.page_pool.write_page(page_id, layer_id, (_k, _v))
+            self._page_pool.write_page(page_id, layer_id, (_k, _v))
 
     def prefill(
         self, sequences: list[Sequence], layer_id: int, kv: tuple[Tensor, Tensor]
@@ -135,3 +149,6 @@ class PageManager:
         k, v = kv
         for i, sequence in enumerate(sequences):
             self._prefill_one(sequence, layer_id, (k[i, ...], v[i, ...]))
+
+
+__all__ = ["PageManager"]

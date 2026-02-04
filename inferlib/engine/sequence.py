@@ -11,7 +11,7 @@ class SequenceState(Enum):
 @dataclass
 class Sequence:
     s_id: int
-    state: SequenceState
+    state: SequenceState = SequenceState.WAITING
     prompt_tokens: list[int]
     completion_tokens: list[int]
     last_token_id: int = -1

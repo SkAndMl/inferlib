@@ -73,7 +73,12 @@ class MHA(nn.Module):
         self._layer_id = _layer_id
 
     def _online_attention_one(
-        self, q: Tensor, k: Tensor, v: Tensor, cache: PageManager, sequence: Sequence
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        page_manager: PageManager,
+        sequence: Sequence,
     ) -> Tensor:
         running_denom = torch.zeros(
             size=(self.cfg.n_head, 1, 1),
@@ -91,7 +96,7 @@ class MHA(nn.Module):
         kf_cur = k.to(torch.float32)
         vf_cur = v.to(torch.float32)
 
-        for k_i, v_i in cache.read_pages(sequence, self._layer_id):
+        for k_i, v_i in page_manager.read_pages(sequence, self._layer_id):
             kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
 
             S_i: Tensor = (qf @ kf.transpose(-2, -1)) / (
@@ -126,7 +131,7 @@ class MHA(nn.Module):
         y = y * alpha + (P_i @ vf_cur)
         y /= running_denom
 
-        cache.write(sequence, self._layer_id, (k, v))
+        page_manager.write(sequence, self._layer_id, (k, v))
         return y.to(q.dtype)
 
     def _online_attention(
@@ -134,7 +139,7 @@ class MHA(nn.Module):
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        cache: PageManager,
+        page_manager: PageManager,
         sequences: List[Sequence],
     ) -> Tensor:
         assert q.shape[2] == k.shape[2] == v.shape[2] == 1
@@ -143,7 +148,7 @@ class MHA(nn.Module):
         for i, sequence in enumerate(sequences):
             ys.append(
                 self._online_attention_one(
-                    q[i, ...], k[i, ...], v[i, ...], cache, sequence
+                    q[i, ...], k[i, ...], v[i, ...], page_manager, sequence
                 )
             )
         y = torch.stack(ys)
@@ -152,7 +157,7 @@ class MHA(nn.Module):
     def forward(
         self,
         x: Tensor,
-        cache: PageManager,
+        page_manager: PageManager,
         sequences: List[Sequence],
         prefill: bool = False,
     ) -> Tensor:
@@ -165,14 +170,14 @@ class MHA(nn.Module):
         v: Tensor = v.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
 
         if prefill and self.cfg.use_kv_cache:
-            cache.prefill(sequences, self._layer_id, (k, v))
+            page_manager.prefill(sequences, self._layer_id, (k, v))
 
         if self.cfg.use_kv_cache and not prefill:
             y = self._online_attention(
                 q[..., -1:, :],
                 k[..., k_len - 1 : k_len, :],
                 v[..., k_len - 1 : k_len, :],
-                cache=cache,
+                page_manager=page_manager,
                 sequences=sequences,
             )
         else:
@@ -212,11 +217,13 @@ class Block(nn.Module):
     def forward(
         self,
         x: Tensor,
-        cache: PageManager,
+        page_manager: PageManager,
         sequences: List[Sequence],
         prefill: bool = False,
     ) -> Tensor:
-        x = x + self.resid_drop(self.attn(self.ln_1(x), cache, sequences, prefill))
+        x = x + self.resid_drop(
+            self.attn(self.ln_1(x), page_manager, sequences, prefill)
+        )
         x = x + self.resid_drop(self.mlp(self.ln_2(x)))
         return x
 
@@ -239,7 +246,7 @@ class GPT2(nn.Module, Model):
     def forward(
         self,
         x: Tensor,
-        cache: PageManager,
+        page_manager: PageManager,
         sequences: List[Sequence],
         prefill: bool = False,
     ) -> Tuple[Tensor, Dict[str, Tuple[Tensor, Tensor]] | None]:
@@ -248,7 +255,7 @@ class GPT2(nn.Module, Model):
         )
         x = self.emb_drop(self.wte(x) + self.wpe(pos))
         for block in self.h:
-            x = block(x, cache, sequences, prefill)
+            x = block(x, page_manager, sequences, prefill)
 
         return self.lm_head(self.ln_f(x))
 
@@ -294,19 +301,21 @@ class GPT2(nn.Module, Model):
         return model_instance
 
     @torch.inference_mode()
-    def prefill(self, *, sequences: list[Sequence], cache: PageManager) -> None:
+    def prefill(self, *, sequences: list[Sequence], page_manager: PageManager) -> None:
         # TODO: p0 optimization
         for sequence in sequences:
             batch = torch.tensor(
                 [sequence.prompt_tokens], device=self.wte.weight.device
             )
-            _ = self(batch, cache, [sequence], True)
+            _ = self(batch, page_manager, [sequence], True)
 
     @torch.inference_mode()
-    def decode(self, *, sequences: list[Sequence], cache: PageManager) -> list[int]:
+    def decode(
+        self, *, sequences: list[Sequence], page_manager: PageManager
+    ) -> list[int]:
         batch = torch.tensor([[seq.last_token_id] for seq in sequences])
         batch = batch.to(device=self.wte.weight.device)
 
-        logits: Tensor = self(batch, cache, sequences)
+        logits: Tensor = self(batch, page_manager, sequences)
         next_tokens = logits.argmax(dim=-1)
         return next_tokens.squeeze().tolist()

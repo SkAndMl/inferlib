@@ -5,9 +5,11 @@ from inferlib.engine.page import PageManager
 
 class Model(ABC):
     @abstractmethod
-    def prefill(self, *, sequences: list[Sequence], cache: PageManager) -> None:
+    def prefill(self, *, sequences: list[Sequence], page_manager: PageManager) -> None:
         raise NotImplementedError()
 
     @abstractmethod
-    def decode(self, *, sequences: list[Sequence], cache: PageManager) -> list[int]:
+    def decode(
+        self, *, sequences: list[Sequence], page_manager: PageManager
+    ) -> list[int]:
         raise NotImplementedError()
