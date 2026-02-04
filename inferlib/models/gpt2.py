@@ -7,6 +7,7 @@ from typing import Dict, List, Literal, Tuple
 
 from inferlib.engine.page import PageManager
 from inferlib.engine.sequence import Sequence
+from inferlib.models._base import Model
 
 
 @dataclass
@@ -220,7 +221,7 @@ class Block(nn.Module):
         return x
 
 
-class GPT2(nn.Module):
+class GPT2(nn.Module, Model):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -293,8 +294,13 @@ class GPT2(nn.Module):
         return model_instance
 
     @torch.inference_mode()
-    def prefill(self, *, sequences: list[Sequence], cache: PageManager):
-        pass
+    def prefill(self, *, sequences: list[Sequence], cache: PageManager) -> None:
+        # TODO: p0 optimization
+        for sequence in sequences:
+            batch = torch.tensor(
+                [sequence.prompt_tokens], device=self.wte.weight.device
+            )
+            _ = self(batch, cache, [sequence], True)
 
     @torch.inference_mode()
     def decode(self, *, sequences: list[Sequence], cache: PageManager) -> list[int]:
