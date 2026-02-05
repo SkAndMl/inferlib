@@ -11,13 +11,13 @@ class SequenceState(Enum):
 @dataclass
 class Sequence:
     s_id: int
-    state: SequenceState = SequenceState.WAITING
     prompt_tokens: list[int]
     completion_tokens: list[int]
+    eos_token_id: int
+    state: SequenceState = SequenceState.WAITING
     last_token_id: int = -1
     temperature: float = 0.1
     max_tokens: int = 200
-    eos_token_id: int
 
     @property
     def sequence_length(self) -> int:

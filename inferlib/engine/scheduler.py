@@ -3,6 +3,7 @@ from collections import deque
 
 from inferlib.engine.page import PageManager
 from inferlib.engine.sequence import Sequence, SequenceState
+from inferlib.log import logger
 
 
 class Scheduler:
@@ -17,6 +18,9 @@ class Scheduler:
     def add_request(self, sequence: Sequence):
         sequence.state = SequenceState.WAITING
         self.prefill_sequences.append(sequence)
+        logger.debug(
+            f"sequence: {sequence.s_id} added; # prefill: {len(self.prefill_sequences)}"
+        )
 
     def get_finished_sequences(self) -> list[Sequence]:
         sequences = []
@@ -25,6 +29,7 @@ class Scheduler:
         return sequences
 
     def schedule(self) -> list[Sequence]:
+        logger.debug("scheduling...")
         batch = []
         if len(self.decode_sequences) > 0:
             while self.decode_sequences and len(batch) < self.batch_size:
@@ -39,6 +44,7 @@ class Scheduler:
 
                 seq.state = SequenceState.RUNNING
                 batch.append(seq)
+            logger.debug(f"scheduled {len(batch)} decode sequences")
             return batch
         if len(self.prefill_sequences) > 0:
             while self.prefill_sequences and len(batch) < self.batch_size:
@@ -51,6 +57,7 @@ class Scheduler:
 
                 seq.state = SequenceState.RUNNING
                 batch.append(seq)
+            logger.debug(f"scheduled {len(batch)} prefill sequences")
             return batch
 
     def update(self, sequences: list[Sequence]):
@@ -61,6 +68,7 @@ class Scheduler:
                 sequence.state = SequenceState.FINISHED
                 self.page_manager.free(sequence.s_id)
                 self.finished_sequences.append(sequence)
+                logger.info(f"{sequence.s_id} finished...")
                 continue
 
             sequence.state = SequenceState.WAITING

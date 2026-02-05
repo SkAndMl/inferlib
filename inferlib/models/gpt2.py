@@ -148,10 +148,14 @@ class MHA(nn.Module):
         for i, sequence in enumerate(sequences):
             ys.append(
                 self._online_attention_one(
-                    q[i, ...], k[i, ...], v[i, ...], page_manager, sequence
+                    q[i : i + 1, ...],
+                    k[i : i + 1, ...],
+                    v[i : i + 1, ...],
+                    page_manager,
+                    sequence,
                 )
             )
-        y = torch.stack(ys)
+        y = torch.stack(ys).squeeze(1)
         return y.to(q.dtype)
 
     def forward(
@@ -250,9 +254,12 @@ class GPT2(nn.Module, Model):
         sequences: List[Sequence],
         prefill: bool = False,
     ) -> Tuple[Tensor, Dict[str, Tuple[Tensor, Tensor]] | None]:
-        pos = torch.tensor(
-            [seq.sequence_length - 1 for seq in sequences], device=x.device
-        )
+        if prefill:
+            pos = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
+        else:
+            pos = torch.tensor(
+                [[seq.sequence_length - 1] for seq in sequences], device=x.device
+            )
         x = self.emb_drop(self.wte(x) + self.wpe(pos))
         for block in self.h:
             x = block(x, page_manager, sequences, prefill)
@@ -318,4 +325,8 @@ class GPT2(nn.Module, Model):
 
         logits: Tensor = self(batch, page_manager, sequences)
         next_tokens = logits.argmax(dim=-1)
-        return next_tokens.squeeze().tolist()
+        return (
+            [next_tokens.squeeze().item()]
+            if len(sequences) == 1
+            else next_tokens.squeeze().tolist()
+        )
