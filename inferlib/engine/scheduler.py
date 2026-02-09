@@ -1,9 +1,50 @@
 import math
-from collections import deque
+from collections import defaultdict, deque
+from typing import Literal
 
 from inferlib.engine.page import PageManager
 from inferlib.engine.sequence import Sequence, SequenceState
 from inferlib.log import logger
+
+
+class Bucket:
+    def __init__(self, page_size: int):
+        self.page_size = page_size
+        self.buckets: dict[int, deque[Sequence]] = defaultdict(deque)
+        self._total_sequences: int = 0
+
+    def add(
+        self,
+        sequences: Sequence | list[Sequence],
+        append: Literal["left", "right"] = "right",
+    ):
+        if isinstance(sequences, Sequence):
+            sequences = [sequences]
+        for sequence in sequences:
+            bucket_idx = (
+                sequence.sequence_length + self.page_size - 1
+            ) // self.page_size
+
+            match append:
+                case "right":
+                    self.buckets[bucket_idx].append(sequence)
+                case "left":
+                    self.buckets[bucket_idx].appendleft(sequence)
+            self._total_sequences += 1
+
+    def get_batch(self, batch_size: int) -> list[Sequence]:
+        if len(self) == 0:
+            return []
+
+        max_idx = max(self.buckets, key=lambda k: len(self.buckets[k]))
+        batch = []
+        while self.buckets[max_idx] and len(batch) < batch_size:
+            batch.append(self.buckets[max_idx].popleft())
+            self._total_sequences -= 1
+        return batch
+
+    def __len__(self):
+        return self._total_sequences
 
 
 class Scheduler:
@@ -11,15 +52,15 @@ class Scheduler:
         self.page_manager = page_manager
         self._page_size = page_manager.page_size
         self.batch_size = batch_size
-        self.prefill_sequences: deque[Sequence] = deque()
+        self.prefill_bucket = Bucket(self._page_size)
         self.decode_sequences: deque[Sequence] = deque()
         self.finished_sequences: deque[Sequence] = deque()
 
     def add_request(self, sequence: Sequence):
         sequence.state = SequenceState.WAITING
-        self.prefill_sequences.append(sequence)
+        self.prefill_bucket.add(sequence)
         logger.debug(
-            f"sequence: {sequence.s_id} added; # prefill: {len(self.prefill_sequences)}"
+            f"sequence: {sequence.s_id} added; # prefill: {len(self.prefill_bucket)}"
         )
 
     def get_finished_sequences(self) -> list[Sequence]:
@@ -45,19 +86,19 @@ class Scheduler:
                 batch.append(seq)
             logger.debug(f"scheduled {len(batch)} decode sequences")
             return batch
-        if len(self.prefill_sequences) > 0:
-            while self.prefill_sequences and len(batch) < self.batch_size:
-                seq = self.prefill_sequences.popleft()
 
-                pages_needed = self._calculate_pages_needed(seq)
-                if not self.page_manager.can_allocate(seq.s_id, pages_needed):
-                    self.prefill_sequences.appendleft(seq)
-                    break
+        prefill_batch = self.prefill_bucket.get_batch(self.batch_size)
+        for i, sequence in enumerate(prefill_batch):
+            pages_needed = self._calculate_pages_needed(sequence)
+            if not self.page_manager.can_allocate(sequence.s_id, pages_needed):
+                self.prefill_bucket.add(prefill_batch[i:][::-1], append="left")
+                break
 
-                seq.state = SequenceState.RUNNING
-                batch.append(seq)
-            logger.debug(f"scheduled {len(batch)} prefill sequences")
-            return batch
+            sequence.state = SequenceState.RUNNING
+            batch.append(sequence)
+
+        logger.debug(f"scheduled {len(batch)} prefill sequences")
+        return batch
 
     def update(self, sequences: list[Sequence]):
         assert all(sequence.last_token_id != -1 for sequence in sequences)
