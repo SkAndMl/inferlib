@@ -1,13 +1,3 @@
-if __name__ == "__main__" and (__package__ is None or __package__ == ""):
-    # Allow running this file directly (e.g., `python inferlib/models/gpt2.py`)
-    # by ensuring the repo root is on sys.path.
-    import os
-    import sys
-
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    if repo_root not in sys.path:
-        sys.path.insert(0, repo_root)
-
 import torch
 
 from dataclasses import dataclass
@@ -15,9 +5,9 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 from typing import Dict, List, Literal, Tuple
 
-from inferlib.cache import PagedKVCache
-from inferlib.schema.sequence_state import SequenceState
-from inferlib.util import generated_padded_batch
+from inferlib.engine.page import PageManager
+from inferlib.engine.sequence import Sequence
+from inferlib.models._base import Model
 
 
 @dataclass
@@ -82,23 +72,21 @@ class MHA(nn.Module):
 
         self._layer_id = _layer_id
 
-    def _online_attention(
+    def _online_attention_one(
         self,
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        cache: PagedKVCache,
-        sequence_states: List[SequenceState],
+        page_manager: PageManager,
+        sequence: Sequence,
     ) -> Tensor:
-        assert q.shape[2] == k.shape[2] == v.shape[2] == 1
-
         running_denom = torch.zeros(
-            size=(q.shape[0], self.cfg.n_head, 1, 1),
+            size=(self.cfg.n_head, 1, 1),
             device=q.device,
             dtype=torch.float32,
         )
         running_max = torch.ones(
-            size=(q.shape[0], self.cfg.n_head, 1, 1),
+            size=(self.cfg.n_head, 1, 1),
             device=q.device,
             dtype=torch.float32,
         ) * float("-inf")
@@ -108,19 +96,19 @@ class MHA(nn.Module):
         kf_cur = k.to(torch.float32)
         vf_cur = v.to(torch.float32)
 
-        for k_i, v_i in cache.read_pages(sequence_states, self._layer_id):
+        for k_i, v_i in page_manager.read_pages(sequence, self._layer_id):
             kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
 
             S_i: Tensor = (qf @ kf.transpose(-2, -1)) / (
                 self.head_dim**0.5
-            )  # bsz, head_dim, 1, pg_size
+            )  # head_dim, 1, pg_size
             max_i: Tensor = torch.max(
                 S_i, dim=-1, keepdim=True
             ).values  # bsz, head_dim, 1, 1
 
-            max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
+            max_new = torch.maximum(running_max, max_i)  # head_dim, 1, 1
             P_i = (S_i - max_new).exp()
-            denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
+            denom_i = P_i.sum(dim=-1, keepdim=True)  # head_dim, 1, 1
 
             alpha = (running_max - max_new).exp()
             running_denom = alpha * running_denom + denom_i
@@ -131,28 +119,50 @@ class MHA(nn.Module):
 
         S_i: Tensor = (qf @ kf_cur.transpose(-2, -1)) / (
             self.head_dim**0.5
-        )  # bsz, head_dim, 1, pg_size
-        max_i: Tensor = torch.max(
-            S_i, dim=-1, keepdim=True
-        ).values  # bsz, head_dim, 1, 1
+        )  # head_dim, 1, pg_size
+        max_i: Tensor = torch.max(S_i, dim=-1, keepdim=True).values  # head_dim, 1, 1
 
-        max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
+        max_new = torch.maximum(running_max, max_i)  # head_dim, 1, 1
         P_i = (S_i - max_new).exp()
-        denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
+        denom_i = P_i.sum(dim=-1, keepdim=True)  # head_dim, 1, 1
 
         alpha = (running_max - max_new).exp()
         running_denom = alpha * running_denom + denom_i
         y = y * alpha + (P_i @ vf_cur)
         y /= running_denom
 
-        cache.write(sequence_states, self._layer_id, (k, v))
+        page_manager.write(sequence, self._layer_id, (k, v))
+        return y.to(q.dtype)
+
+    def _online_attention(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        page_manager: PageManager,
+        sequences: List[Sequence],
+    ) -> Tensor:
+        assert q.shape[2] == k.shape[2] == v.shape[2] == 1
+
+        ys = []
+        for i, sequence in enumerate(sequences):
+            ys.append(
+                self._online_attention_one(
+                    q[i : i + 1, ...],
+                    k[i : i + 1, ...],
+                    v[i : i + 1, ...],
+                    page_manager,
+                    sequence,
+                )
+            )
+        y = torch.stack(ys).squeeze(1)
         return y.to(q.dtype)
 
     def forward(
         self,
         x: Tensor,
-        cache: PagedKVCache,
-        sequence_states: List[SequenceState],
+        page_manager: PageManager,
+        sequences: List[Sequence],
         prefill: bool = False,
     ) -> Tensor:
         B, T, D = x.shape
@@ -164,15 +174,15 @@ class MHA(nn.Module):
         v: Tensor = v.reshape(B, T, n_head, self.head_dim).transpose(1, 2)
 
         if prefill and self.cfg.use_kv_cache:
-            cache.prefill(sequence_states, self._layer_id, (k, v))
+            page_manager.prefill(sequences, self._layer_id, (k, v))
 
         if self.cfg.use_kv_cache and not prefill:
             y = self._online_attention(
                 q[..., -1:, :],
                 k[..., k_len - 1 : k_len, :],
                 v[..., k_len - 1 : k_len, :],
-                cache=cache,
-                sequence_states=sequence_states,
+                page_manager=page_manager,
+                sequences=sequences,
             )
         else:
             attn_wts = q @ k.transpose(-2, -1) / (self.head_dim**0.5)  # B, H, N, N
@@ -211,18 +221,18 @@ class Block(nn.Module):
     def forward(
         self,
         x: Tensor,
-        cache: PagedKVCache,
-        sequence_states: List[SequenceState],
+        page_manager: PageManager,
+        sequences: List[Sequence],
         prefill: bool = False,
     ) -> Tensor:
         x = x + self.resid_drop(
-            self.attn(self.ln_1(x), cache, sequence_states, prefill)
+            self.attn(self.ln_1(x), page_manager, sequences, prefill)
         )
         x = x + self.resid_drop(self.mlp(self.ln_2(x)))
         return x
 
 
-class GPT2(nn.Module):
+class GPT2(nn.Module, Model):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -240,17 +250,19 @@ class GPT2(nn.Module):
     def forward(
         self,
         x: Tensor,
-        cache: PagedKVCache,
-        sequence_states: List[SequenceState],
-        cur_pos: int = 0,
+        page_manager: PageManager,
+        sequences: List[Sequence],
         prefill: bool = False,
     ) -> Tuple[Tensor, Dict[str, Tuple[Tensor, Tensor]] | None]:
-        _, T = x.shape
-        x = self.emb_drop(
-            self.wte(x) + self.wpe(torch.arange(cur_pos, cur_pos + T).to(x.device))
-        )
+        if prefill:
+            pos = torch.arange(x.shape[1], device=x.device).unsqueeze(0)
+        else:
+            pos = torch.tensor(
+                [[seq.sequence_length - 1] for seq in sequences], device=x.device
+            )
+        x = self.emb_drop(self.wte(x) + self.wpe(pos))
         for block in self.h:
-            x = block(x, cache, sequence_states, prefill)
+            x = block(x, page_manager, sequences, prefill)
 
         return self.lm_head(self.ln_f(x))
 
@@ -295,88 +307,31 @@ class GPT2(nn.Module):
         model_instance.load_state_dict(sd, strict=False)
         return model_instance
 
-    def _prefill(
-        self, *, x: Tensor, cache: PagedKVCache, sequence_states: List[SequenceState]
-    ):
-        x_recent = x[:, -self.config.n_ctx :].clone()
-        logits = self(x_recent, cache, sequence_states, prefill=True)
-        logits: Tensor = logits[:, -1:, :]
-        next_tokens = logits.argmax(dim=-1)
-        x = torch.cat((x, next_tokens), dim=-1).to(logits.device)
-        return x
-
-    def generate(
-        self,
-        *,
-        sequences: list[list[int]],
-        cache: PagedKVCache,
-        sequence_states: List[SequenceState],
-        max_tokens: int = 200,
-        temperature: float = 0.1,
-        pad_token_id: int = 50256,
-    ):
+    @torch.inference_mode()
+    def prefill(
+        self, *, sequences: list[Sequence], page_manager: PageManager
+    ) -> list[int]:
+        # TODO: p0 optimization
+        next_tokens: list[int] = []
         for sequence in sequences:
-            assert len(sequence) + max_tokens <= self.config.n_ctx
+            batch = torch.tensor(
+                [sequence.prompt_tokens], device=self.wte.weight.device
+            )
+            logits: Tensor = self(batch, page_manager, [sequence], True)
+            next_tokens.append(logits[:, -1, :].argmax(dim=-1).squeeze().item())
+        return next_tokens
 
-        # assume length is only 1 for now
-        self.eval()
-        with torch.inference_mode():
-            x, starting_positions = generated_padded_batch(sequences, pad_token_id)
-            x = x.to(device=self.wte.weight.device)
-            prompt_len = x.shape[1]
-            x = self._prefill(x=x, cache=cache, sequence_states=sequence_states)
-            for pos in range(max_tokens - 1):
-                x_last = x[:, -1:].clone()
-                logits: Tensor = self(
-                    x_last, cache, sequence_states, cur_pos=prompt_len + pos
-                )
-                probs = F.softmax(logits / temperature, dim=-1)
+    @torch.inference_mode()
+    def decode(
+        self, *, sequences: list[Sequence], page_manager: PageManager
+    ) -> list[int]:
+        batch = torch.tensor([[seq.last_token_id] for seq in sequences])
+        batch = batch.to(device=self.wte.weight.device)
 
-                next_tokens = torch.multinomial(probs[:, -1, :], 1)  # b, 1
-                x = torch.cat((x, next_tokens), dim=-1).to(logits.device)
-
-        decoded_sequences = x.tolist()
-        decoded_sequences = [
-            d[s:] for d, s in zip(decoded_sequences, starting_positions)
-        ]
-
-        cache.free_pages(sequence_states)
-        return decoded_sequences
-
-
-if __name__ == "__main__":
-    from tiktoken import get_encoding
-    from inferlib.cache import PagePool
-
-    tokenizer = get_encoding("gpt2")
-    model = GPT2.from_pretrained("small")
-
-    page_size = 16
-
-    sequence_states = [SequenceState(seq_id="s1"), SequenceState(seq_id="s2")]
-    page_pool = PagePool(
-        num_pages=128,
-        num_layers=model.config.n_layer,
-        num_heads=model.config.n_head,
-        page_size=page_size,
-        head_dim=model.config.n_embd // model.config.n_head,
-        dtype=torch.float32,
-        device=torch.device("cpu"),
-    )
-    cache = PagedKVCache(
-        page_pool=page_pool,
-        num_layers=model.config.n_layer,
-        page_size=page_size,
-        device="cpu",
-    )
-
-    text = "Hi, how"
-    sequences = [tokenizer.encode(text), tokenizer.encode(text)]
-    output_sequences = model.generate(
-        sequences=sequences, max_tokens=10, cache=cache, sequence_states=sequence_states
-    )
-
-    for i in range(len(output_sequences)):
-        print(f"Seq id: {sequence_states[i].seq_id}")
-        print(f"Output: {tokenizer.decode(output_sequences[i])}")
-        print("=" * 20)
+        logits: Tensor = self(batch, page_manager, sequences)
+        next_tokens = logits.argmax(dim=-1)
+        return (
+            [next_tokens.squeeze().item()]
+            if len(sequences) == 1
+            else next_tokens.squeeze().tolist()
+        )
