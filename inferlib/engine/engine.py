@@ -25,7 +25,7 @@ class InferlibEngine:
             num_heads=self.model_config.n_head,
             page_size=16,
             head_dim=self.model_config.n_embd // self.model_config.n_head,
-            dtype=torch.float16,
+            dtype=torch.float32,
             device=torch.device("cpu"),
         )
         self.scheduler = Scheduler(page_manager=self.page_manager, batch_size=1)

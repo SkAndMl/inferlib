@@ -112,7 +112,7 @@ class PageManager:
         self._page_pool.write(
             self._page_table[sequence.s_id][-1],
             layer_id,
-            sequence.sequence_length % self.page_size,
+            (sequence.sequence_length - 1) % self.page_size,
             kv,
         )
 

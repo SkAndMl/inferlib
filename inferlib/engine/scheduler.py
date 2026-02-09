@@ -36,11 +36,10 @@ class Scheduler:
                 seq = self.decode_sequences.popleft()
 
                 pages_needed = self._calculate_pages_needed(seq)
-                if pages_needed and not self.page_manager.can_allocate(
-                    seq.s_id, pages_needed
-                ):
-                    self.decode_sequences.appendleft(seq)
-                    break
+                if pages_needed:
+                    if not self.page_manager.can_allocate(seq.s_id, pages_needed):
+                        self.decode_sequences.appendleft(seq)
+                        break
 
                 seq.state = SequenceState.RUNNING
                 batch.append(seq)

@@ -14,11 +14,14 @@ class Runner:
         if sequences[0].last_token_id == -1:
             # prefill
             assert all(seq.last_token_id == -1 for seq in sequences)
-            self.llm.prefill(sequences=sequences, page_manager=self.page_manager)
-            for seq in sequences:
-                seq.last_token_id = seq.prompt_tokens[-1]
-            logger.info(f"finished running {len(sequences)} sequences")
-            return sequences
+            next_tokens = self.llm.prefill(
+                sequences=sequences, page_manager=self.page_manager
+            )
+            for seq, next_token in zip(sequences, next_tokens):
+                seq.completion_tokens.append(next_token)
+                seq.last_token_id = next_token
+            logger.info(f"finished prefilling {len(sequences)} sequences")
+            return
 
         assert not any(seq.last_token_id == -1 for seq in sequences)
         tokens = self.llm.decode(sequences=sequences, page_manager=self.page_manager)

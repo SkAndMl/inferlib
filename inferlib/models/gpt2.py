@@ -308,13 +308,18 @@ class GPT2(nn.Module, Model):
         return model_instance
 
     @torch.inference_mode()
-    def prefill(self, *, sequences: list[Sequence], page_manager: PageManager) -> None:
+    def prefill(
+        self, *, sequences: list[Sequence], page_manager: PageManager
+    ) -> list[int]:
         # TODO: p0 optimization
+        next_tokens: list[int] = []
         for sequence in sequences:
             batch = torch.tensor(
                 [sequence.prompt_tokens], device=self.wte.weight.device
             )
-            _ = self(batch, page_manager, [sequence], True)
+            logits: Tensor = self(batch, page_manager, [sequence], True)
+            next_tokens.append(logits[:, -1, :].argmax(dim=-1).squeeze().item())
+        return next_tokens
 
     @torch.inference_mode()
     def decode(
