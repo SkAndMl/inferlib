@@ -3,6 +3,7 @@ import torch
 from dataclasses import dataclass
 from torch import Tensor, nn
 from torch.nn import functional as F
+from transformers import AutoModelForCausalLM
 
 
 @dataclass
@@ -32,25 +33,21 @@ class Qwen3Config:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
-def get_freqs_cis(cfg: Qwen3Config) -> Tensor:
+def get_freqs_cis(cfg: Qwen3Config):
     pos = torch.arange(0, cfg.max_position_embeddings)
     dim = cfg.head_dim
     thetas = cfg.rope_theta ** (-2 * torch.arange(0, dim // 2) / dim)
-
     freqs = torch.outer(pos, thetas)
-    real = torch.cos(freqs)
-    imag = torch.sin(freqs)
-    return torch.complex(real, imag)
+    return torch.cos(freqs), torch.sin(freqs)  # each: [max_pos, head_dim//2]
 
 
-def apply_rot_emb(x: Tensor, freqs_cis: Tensor, start_pos: int = 0) -> Tensor:
-    bsz, n_head, seq_len, head_dim = x.shape
-    _x = x.view(bsz, n_head, seq_len, head_dim // 2, 2)
-    _x = torch.view_as_complex(_x)  # bsz, n_head, seq_len, head_dim/2
-    _freqs = freqs_cis[start_pos : start_pos + seq_len, :]  # seq_len, head_dim/2
-    _x_rot = _x * _freqs[None, None, :, :]
-    _x_rot = torch.view_as_real(_x_rot).view(bsz, n_head, seq_len, head_dim)
-    return _x_rot
+def apply_rot_emb(x: Tensor, cos: Tensor, sin: Tensor, start_pos: int = 0):
+    _, _, seq_len, _ = x.shape
+    cos = cos[start_pos : start_pos + seq_len, :][None, None, :, :]  # 1,1,T,D/2
+    sin = sin[start_pos : start_pos + seq_len, :][None, None, :, :]
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
 
 
 class SiLUActivation(nn.Module):
@@ -65,8 +62,8 @@ class Qwen3RMSNorm(nn.Module):
         self.eps = rms_norm_eps
 
     def forward(self, x: Tensor) -> Tensor:
-        rms = x.pow(2).mean(dim=-1, keepdim=True).sqrt()
-        x_norm = x / (rms + self.eps)
+        rms = (x.pow(2).mean(dim=-1, keepdim=True) + self.eps).sqrt()
+        x_norm = x / rms
         return self.weight * x_norm
 
 
@@ -105,7 +102,9 @@ class Qwen3Attention(nn.Module):
             hidden_size=cfg.head_dim, rms_norm_eps=cfg.rms_norm_eps
         )
 
-        self.register_buffer("freqs_cis", get_freqs_cis(cfg), persistent=False)
+        cos, sin = get_freqs_cis(cfg)
+        self.register_buffer("cos", cos, persistent=False)
+        self.register_buffer("sin", sin, persistent=False)
 
     def forward(self, x: Tensor) -> Tensor:
         B, T, D = x.shape
@@ -125,15 +124,15 @@ class Qwen3Attention(nn.Module):
 
         q, k = self.q_norm(q), self.k_norm(k)
 
+        q = apply_rot_emb(q, self.cos, self.sin)
+        k = apply_rot_emb(k, self.cos, self.sin)
+
         k = k.repeat_interleave(
             self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
         )
         v = v.repeat_interleave(
             self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
         )
-
-        q = apply_rot_emb(q, self.freqs_cis)
-        k = apply_rot_emb(k, self.freqs_cis)
 
         mask: Tensor = torch.full(
             size=(T, T), fill_value=float("-inf"), device=x.device, dtype=x.dtype
@@ -184,6 +183,7 @@ class Qwen3DecoderLayer(nn.Module):
 class Qwen3(nn.Module):
     def __init__(self, cfg: Qwen3Config):
         super().__init__()
+        self.cfg = cfg
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(
             [Qwen3DecoderLayer(cfg) for _ in range(cfg.num_hidden_layers)]
@@ -202,3 +202,27 @@ class Qwen3(nn.Module):
         for layer in self.layers:
             x = layer(x)
         return self.lm_head(self.norm(x))
+
+    @classmethod
+    def from_pretrained(cls, model_class="Qwen/Qwen3-0.6B") -> "Qwen3":
+        hf_sd = AutoModelForCausalLM.from_pretrained(model_class).state_dict()
+        keys = sorted(hf_sd.keys())
+        for k in keys:
+            if k.startswith("model."):
+                hf_sd[k[len("model.") :]] = hf_sd.pop(k)
+
+        cfg = Qwen3Config()
+        model = Qwen3(cfg)
+        model.load_state_dict(hf_sd)
+        return model
+
+    @torch.inference_mode()
+    def generate(self, input_tokens: list[int], max_tokens: int = 20):
+        x: Tensor = torch.tensor([input_tokens], device=self.embed_tokens.weight.device)
+
+        for _ in range(max_tokens):
+            logits: Tensor = self(x)
+            next_tokens = logits[:, -1, :].argmax(dim=-1, keepdim=True)
+            x = torch.cat([x, next_tokens], dim=1)
+
+        return x.tolist()[0]
