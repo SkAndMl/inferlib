@@ -32,6 +32,27 @@ class Qwen3Config:
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
+def get_freqs_cis(cfg: Qwen3Config) -> Tensor:
+    pos = torch.arange(0, cfg.max_position_embeddings)
+    dim = cfg.head_dim
+    thetas = cfg.rope_theta ** (-2 * torch.arange(0, dim // 2) / dim)
+
+    freqs = torch.outer(pos, thetas)
+    real = torch.cos(freqs)
+    imag = torch.sin(freqs)
+    return torch.complex(real, imag)
+
+
+def apply_rot_emb(x: Tensor, freqs_cis: Tensor, start_pos: int = 0) -> Tensor:
+    bsz, n_head, seq_len, head_dim = x.shape
+    _x = x.view(bsz, n_head, seq_len, head_dim // 2, 2)
+    _x = torch.view_as_complex(_x)  # bsz, n_head, seq_len, head_dim/2
+    _freqs = freqs_cis[start_pos : start_pos + seq_len, :]  # seq_len, head_dim/2
+    _x_rot = _x * _freqs[None, None, :, :]
+    _x_rot = torch.view_as_real(_x_rot).view(bsz, n_head, seq_len, head_dim)
+    return _x_rot
+
+
 class SiLUActivation(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         return x * torch.sigmoid(x)
@@ -84,6 +105,8 @@ class Qwen3Attention(nn.Module):
             hidden_size=cfg.head_dim, rms_norm_eps=cfg.rms_norm_eps
         )
 
+        self.register_buffer("freqs_cis", get_freqs_cis(cfg), persistent=False)
+
     def forward(self, x: Tensor) -> Tensor:
         B, T, D = x.shape
         q: Tensor = self.q_proj(x)
@@ -109,15 +132,17 @@ class Qwen3Attention(nn.Module):
             self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
         )
 
-        # TODO: add RoPE
+        q = apply_rot_emb(q, self.freqs_cis)
+        k = apply_rot_emb(k, self.freqs_cis)
 
-        mask = torch.full(
+        mask: Tensor = torch.full(
             size=(T, T), fill_value=float("-inf"), device=x.device, dtype=x.dtype
         ).triu(1)
 
-        attn = q @ k.transpose(2, 3) / self.cfg.head_dim**0.5
+        attn: Tensor = q @ k.transpose(2, 3) / self.cfg.head_dim**0.5
         attn += mask
-        attn = F.softmax(attn, dim=-1)
+        attn = F.softmax(attn.float(), dim=-1).to(q.dtype)
+        attn = F.dropout(attn, p=self.cfg.attention_dropout, training=self.training)
 
         y: Tensor = attn @ v  # B, N_Q_HEADS, T, HEAD_DIM
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
@@ -171,7 +196,6 @@ class Qwen3(nn.Module):
         )
         if cfg.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
-        # TODO: add rope
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.embed_tokens(x)
