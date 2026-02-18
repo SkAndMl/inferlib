@@ -5,6 +5,10 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM
 
+from inferlib.engine.page import PageManager
+from inferlib.engine.sequence import Sequence
+from inferlib.models._base import Model
+
 
 @dataclass
 class Qwen3Config:
@@ -41,13 +45,18 @@ def get_freqs_cis(cfg: Qwen3Config):
     return torch.cos(freqs), torch.sin(freqs)  # each: [max_pos, head_dim//2]
 
 
-def apply_rot_emb(x: Tensor, cos: Tensor, sin: Tensor, start_pos: int = 0):
-    _, _, seq_len, _ = x.shape
-    cos = cos[start_pos : start_pos + seq_len, :][None, None, :, :]  # 1,1,T,D/2
-    sin = sin[start_pos : start_pos + seq_len, :][None, None, :, :]
+def apply_rot_emb(x: Tensor, cos: Tensor, sin: Tensor, start_positions: Tensor = None):
+    bsz, _, seq_len, _ = x.shape
+    t = torch.arange(seq_len, device=x.device, dtype=torch.long)[None, :]
+    if start_positions is None:
+        position_ids = torch.zeros((bsz, 1), device=x.device, dtype=torch.long) + t
+    else:
+        position_ids = start_positions[:, None] + t
+    cos_bt = cos[position_ids][:, None, :, :]
+    sin_bt = sin[position_ids][:, None, :, :]
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+    return torch.cat([x1 * cos_bt - x2 * sin_bt, x2 * cos_bt + x1 * sin_bt], dim=-1)
 
 
 class SiLUActivation(nn.Module):
@@ -68,7 +77,7 @@ class Qwen3RMSNorm(nn.Module):
 
 
 class Qwen3Attention(nn.Module):
-    def __init__(self, cfg: Qwen3Config):
+    def __init__(self, cfg: Qwen3Config, _layer_id: int = 0):
         super().__init__()
         self.cfg = cfg
 
@@ -106,7 +115,112 @@ class Qwen3Attention(nn.Module):
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def forward(self, x: Tensor) -> Tensor:
+        self._layer_id = _layer_id
+
+    def _online_attention_one(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        sequence: Sequence,
+        page_manager: PageManager,
+    ) -> Tensor:
+        running_denom = torch.zeros(
+            size=(self.cfg.num_attention_heads, 1, 1),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        running_max = torch.ones(
+            size=(self.cfg.num_attention_heads, 1, 1),
+            device=q.device,
+            dtype=torch.float32,
+        ) * float("-inf")
+        y = torch.zeros_like(q, dtype=torch.float32)
+
+        qf = q.to(torch.float32)
+        kf_cur = k.to(torch.float32).repeat_interleave(
+            self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+        )
+        vf_cur = v.to(torch.float32).repeat_interleave(
+            self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+        )
+
+        for k_i, v_i in page_manager.read_pages(sequence, self._layer_id):
+            kf, vf = k_i[None, ...].to(torch.float32), v_i[None, ...].to(torch.float32)
+            kf = kf.repeat_interleave(
+                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+            )
+            vf = vf.repeat_interleave(
+                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+            )
+
+            S_i: Tensor = (qf @ kf.transpose(-2, -1)) / (
+                self.cfg.head_dim**0.5
+            )  # head_dim, 1, pg_size
+            max_i: Tensor = torch.max(
+                S_i, dim=-1, keepdim=True
+            ).values  # bsz, head_dim, 1, 1
+
+            max_new = torch.maximum(running_max, max_i)  # head_dim, 1, 1
+            P_i = (S_i - max_new).exp()
+            denom_i = P_i.sum(dim=-1, keepdim=True)  # head_dim, 1, 1
+
+            alpha = (running_max - max_new).exp()
+            running_denom = alpha * running_denom + denom_i
+            y = y * alpha + (P_i @ vf)
+
+            # update max
+            running_max = max_new
+
+        S_i: Tensor = (qf @ kf_cur.transpose(-2, -1)) / (
+            self.cfg.head_dim**0.5
+        )  # head_dim, 1, pg_size
+        max_i: Tensor = torch.max(S_i, dim=-1, keepdim=True).values  # head_dim, 1, 1
+
+        max_new = torch.maximum(running_max, max_i)  # head_dim, 1, 1
+        P_i = (S_i - max_new).exp()
+        denom_i = P_i.sum(dim=-1, keepdim=True)  # head_dim, 1, 1
+
+        alpha = (running_max - max_new).exp()
+        running_denom = alpha * running_denom + denom_i
+        y = y * alpha + (P_i @ vf_cur)
+        y /= running_denom
+
+        page_manager.write(sequence, self._layer_id, (k, v))
+        return y.to(q.dtype)
+
+    def _online_attention(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        sequences: list[Sequence],
+        page_manager: PageManager,
+    ) -> Tensor:
+        assert q.shape[2] == k.shape[2] == v.shape[2] == 1
+
+        ys = []
+        for i, sequence in enumerate(sequences):
+            ys.append(
+                self._online_attention_one(
+                    q[i : i + 1, ...],
+                    k[i : i + 1, ...],
+                    v[i : i + 1, ...],
+                    sequence=sequence,
+                    page_manager=page_manager,
+                )
+            )
+        y = torch.stack(ys).squeeze(1)
+        return y.to(q.dtype)
+
+    def forward(
+        self,
+        x: Tensor,
+        sequences: list[Sequence],
+        page_manager: PageManager,
+        prefill: bool = False,
+        start_positions: Tensor = None,
+    ) -> Tensor:
         B, T, D = x.shape
         q: Tensor = self.q_proj(x)
         k: Tensor = self.k_proj(x)
@@ -124,27 +238,48 @@ class Qwen3Attention(nn.Module):
 
         q, k = self.q_norm(q), self.k_norm(k)
 
-        q = apply_rot_emb(q, self.cos, self.sin)
-        k = apply_rot_emb(k, self.cos, self.sin)
-
-        k = k.repeat_interleave(
-            self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+        q = apply_rot_emb(
+            q, cos=self.cos, sin=self.sin, start_positions=start_positions
         )
-        v = v.repeat_interleave(
-            self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+        k = apply_rot_emb(
+            k, cos=self.cos, sin=self.sin, start_positions=start_positions
         )
 
-        mask: Tensor = torch.full(
-            size=(T, T), fill_value=float("-inf"), device=x.device, dtype=x.dtype
-        ).triu(1)
+        if prefill and self.cfg.use_cache:
+            page_manager.prefill(
+                sequences=sequences, layer_id=self._layer_id, kv=(k, v)
+            )
 
-        attn: Tensor = q @ k.transpose(2, 3) / self.cfg.head_dim**0.5
-        attn += mask
-        attn = F.softmax(attn.float(), dim=-1).to(q.dtype)
-        attn = F.dropout(attn, p=self.cfg.attention_dropout, training=self.training)
+        if self.cfg.use_cache and not prefill:
+            y = self._online_attention(
+                q[..., -1:, :],
+                k[..., -1:, :],
+                v[..., -1:, :],
+                sequences=sequences,
+                page_manager=page_manager,
+            )
 
-        y: Tensor = attn @ v  # B, N_Q_HEADS, T, HEAD_DIM
-        y = y.transpose(1, 2).contiguous().view(B, T, -1)
+        else:
+            k = k.repeat_interleave(
+                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+            )
+            v = v.repeat_interleave(
+                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
+            )
+
+            mask: Tensor = torch.full(
+                size=(T, T), fill_value=float("-inf"), device=x.device, dtype=x.dtype
+            ).triu(1)
+
+            attn: Tensor = q @ k.transpose(2, 3) / self.cfg.head_dim**0.5
+            attn += mask
+            attn = F.softmax(attn.float(), dim=-1).to(q.dtype)
+            attn = F.dropout(attn, p=self.cfg.attention_dropout, training=self.training)
+
+            y: Tensor = attn @ v  # B, N_Q_HEADS, T, HEAD_DIM
+
+        _seq = 1 if self.cfg.use_cache and not prefill else T
+        y = y.transpose(1, 2).contiguous().view(B, _seq, -1)
         return self.o_proj(y)
 
 
@@ -167,26 +302,39 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
-    def __init__(self, cfg: Qwen3Config):
+    def __init__(self, cfg: Qwen3Config, _layer_id: int = 0):
         super().__init__()
-        self.self_attn = Qwen3Attention(cfg)
+        self.self_attn = Qwen3Attention(cfg, _layer_id=_layer_id)
         self.mlp = Qwen3MLP(cfg)
         self.input_layernorm = Qwen3RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.post_attention_layernorm = Qwen3RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
 
-    def forward(self, x: Tensor) -> Tensor:
-        x = x + self.self_attn(self.input_layernorm(x))
+    def forward(
+        self,
+        x: Tensor,
+        sequences: list[Sequence],
+        page_manager: PageManager,
+        prefill: bool = False,
+        start_positions: Tensor = None,
+    ) -> Tensor:
+        x = x + self.self_attn(
+            self.input_layernorm(x),
+            sequences=sequences,
+            page_manager=page_manager,
+            prefill=prefill,
+            start_positions=start_positions,
+        )
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
 
 
-class Qwen3(nn.Module):
+class Qwen3(nn.Module, Model):
     def __init__(self, cfg: Qwen3Config):
         super().__init__()
         self.cfg = cfg
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(cfg) for _ in range(cfg.num_hidden_layers)]
+            [Qwen3DecoderLayer(cfg, i) for i in range(cfg.num_hidden_layers)]
         )
         self.norm = Qwen3RMSNorm(
             hidden_size=cfg.hidden_size, rms_norm_eps=cfg.rms_norm_eps
@@ -197,14 +345,29 @@ class Qwen3(nn.Module):
         if cfg.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(
+        self,
+        x: Tensor,
+        sequences: list[Sequence],
+        page_manager: PageManager,
+        prefill: bool = False,
+        start_positions: Tensor = None,
+    ) -> Tensor:
         x = self.embed_tokens(x)
         for layer in self.layers:
-            x = layer(x)
+            x = layer(
+                x,
+                sequences=sequences,
+                page_manager=page_manager,
+                prefill=prefill,
+                start_positions=start_positions,
+            )
         return self.lm_head(self.norm(x))
 
     @classmethod
-    def from_pretrained(cls, model_class="Qwen/Qwen3-0.6B") -> "Qwen3":
+    def from_pretrained(
+        cls, model_class="Qwen/Qwen3-0.6B"
+    ) -> tuple["Qwen3", Qwen3Config]:
         hf_sd = AutoModelForCausalLM.from_pretrained(model_class).state_dict()
         keys = sorted(hf_sd.keys())
         for k in keys:
@@ -214,15 +377,46 @@ class Qwen3(nn.Module):
         cfg = Qwen3Config()
         model = Qwen3(cfg)
         model.load_state_dict(hf_sd)
-        return model
+        return model, cfg
 
     @torch.inference_mode()
-    def generate(self, input_tokens: list[int], max_tokens: int = 20):
-        x: Tensor = torch.tensor([input_tokens], device=self.embed_tokens.weight.device)
+    def prefill(
+        self, *, sequences: list[Sequence], page_manager: PageManager
+    ) -> list[int]:
+        next_tokens: list[int] = []
+        for sequence in sequences:
+            batch = torch.tensor(
+                [sequence.prompt_tokens], device=self.embed_tokens.weight.device
+            )
+            logits: Tensor = self(
+                batch,
+                sequences=[sequence],
+                page_manager=page_manager,
+                prefill=True,
+                start_positions=None,
+            )
+            next_tokens.append(logits[:, -1, :].argmax(dim=-1).squeeze().item())
+        return next_tokens
 
-        for _ in range(max_tokens):
-            logits: Tensor = self(x)
-            next_tokens = logits[:, -1, :].argmax(dim=-1, keepdim=True)
-            x = torch.cat([x, next_tokens], dim=1)
-
-        return x.tolist()[0]
+    @torch.inference_mode()
+    def decode(
+        self, *, sequences: list[Sequence], page_manager: PageManager
+    ) -> list[int]:
+        batch = torch.tensor([[seq.last_token_id] for seq in sequences])
+        batch = batch.to(device=self.embed_tokens.weight.device)
+        start_positions = torch.tensor(
+            [len(seq) for seq in sequences], device=self.embed_tokens.weight.device
+        )
+        logits: Tensor = self(
+            batch,
+            sequences=sequences,
+            page_manager=page_manager,
+            prefill=False,
+            start_positions=start_positions,
+        )
+        next_tokens = logits.argmax(dim=-1)
+        return (
+            [next_tokens.squeeze().item()]
+            if len(sequences) == 1
+            else next_tokens.squeeze().tolist()
+        )

@@ -19,6 +19,9 @@ class Sequence:
     temperature: float = 0.1
     max_tokens: int = 200
 
+    def __len__(self) -> int:
+        return len(self.prompt_tokens) + len(self.completion_tokens)
+
     @property
     def sequence_length(self) -> int:
         return len(self.prompt_tokens) + len(self.completion_tokens)
