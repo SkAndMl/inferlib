@@ -1,11 +1,11 @@
 import asyncio
-import tiktoken
 import torch
 
 from asyncio import Future
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from typing import Any
 
-from inferlib.models import GPT2
+from inferlib.models import Qwen3
 
 from inferlib.engine.runner import Runner
 from inferlib.engine.scheduler import Scheduler
@@ -16,24 +16,27 @@ from inferlib.log import logger
 
 class InferlibEngine:
     def __init__(self):
-        self.llm = GPT2.from_pretrained("large")
-        self.tokenizer = tiktoken.get_encoding("gpt2")
-        self.model_config = self.llm.config
+        self.llm, self.model_config = Qwen3.from_pretrained("Qwen/Qwen3-0.6B")
+        self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+            "Qwen/Qwen3-0.6B"
+        )
         self.page_manager = PageManager(
             num_pages=128,
-            num_layers=self.model_config.n_layer,
-            num_heads=self.model_config.n_head,
+            num_layers=self.model_config.num_hidden_layers,
+            num_heads=self.model_config.num_key_value_heads,
             page_size=16,
-            head_dim=self.model_config.n_embd // self.model_config.n_head,
+            head_dim=self.model_config.head_dim,
             dtype=torch.float32,
             device=torch.device("cpu"),
         )
-        self.scheduler = Scheduler(page_manager=self.page_manager, batch_size=1)
+        self.scheduler = Scheduler(page_manager=self.page_manager, batch_size=4)
         self.runner = Runner(llm=self.llm, page_manager=self.page_manager)
 
         self._sequence_to_future: dict[str, Future] = {}
         self._task = None
         self._lock = asyncio.Lock()
+
+        self._eot_token = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
 
     def add_request(self, payload: dict[str, Any]) -> Future:
         if self._task is None:
@@ -41,13 +44,18 @@ class InferlibEngine:
 
         assert "message" in payload
         assert "id" in payload
-        prompt_tokens: list[int] = self.tokenizer.encode(payload["message"])
+        prompt_tokens: list[int] = self.tokenizer.apply_chat_template(
+            conversation=[{"role": "user", "content": payload["message"]}],
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
         sequence = Sequence(
             s_id=payload["id"],
             prompt_tokens=prompt_tokens,
             completion_tokens=[],
-            eos_token_id=self.tokenizer.eot_token,
-            max_tokens=10,
+            eos_token_id=self._eot_token,
+            max_tokens=256,
         )
         self.scheduler.add_request(sequence)
         future = Future()
@@ -88,7 +96,9 @@ class InferlibEngine:
                 finished_sequences = self.scheduler.get_finished_sequences()
                 if finished_sequences:
                     for sequence in finished_sequences:
-                        response = self.tokenizer.decode(sequence.completion_tokens)
+                        response = self.tokenizer.decode(
+                            sequence.completion_tokens, skip_special_tokens=True
+                        )
                         self._sequence_to_future[sequence.s_id].set_result(response)
                         del self._sequence_to_future[sequence.s_id]
 

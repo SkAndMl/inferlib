@@ -10,7 +10,7 @@ from inferlib.log import logger
 class Bucket:
     def __init__(self, page_size: int):
         self.page_size = page_size
-        self.buckets: dict[int, deque[Sequence]] = defaultdict(deque)
+        self._buckets: dict[int, deque[Sequence]] = defaultdict(deque)
         self._total_sequences: int = 0
 
     def add(
@@ -27,19 +27,19 @@ class Bucket:
 
             match append:
                 case "right":
-                    self.buckets[bucket_idx].append(sequence)
+                    self._buckets[bucket_idx].append(sequence)
                 case "left":
-                    self.buckets[bucket_idx].appendleft(sequence)
+                    self._buckets[bucket_idx].appendleft(sequence)
             self._total_sequences += 1
 
     def get_batch(self, batch_size: int) -> list[Sequence]:
         if len(self) == 0:
             return []
 
-        max_idx = max(self.buckets, key=lambda k: len(self.buckets[k]))
+        max_idx = max(self._buckets, key=lambda k: len(self._buckets[k]))
         batch = []
-        while self.buckets[max_idx] and len(batch) < batch_size:
-            batch.append(self.buckets[max_idx].popleft())
+        while self._buckets[max_idx] and len(batch) < batch_size:
+            batch.append(self._buckets[max_idx].popleft())
             self._total_sequences -= 1
         return batch
 
@@ -119,4 +119,4 @@ class Scheduler:
         if sequence.last_token_id == -1:
             return math.ceil(len(sequence) / self._page_size)
 
-        return int(not len(sequence) % self._page_size)
+        return int(not (len(sequence) - 1) % self._page_size)

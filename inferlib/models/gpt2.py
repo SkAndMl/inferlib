@@ -11,7 +11,7 @@ from inferlib.models._base import Model
 
 
 @dataclass
-class ModelConfig:
+class GPT2Config:
     attn_pdrop: float = 0.1
     embd_pdrop: float = 0.1
     initializer_range: float = 0.02
@@ -28,12 +28,12 @@ class ModelConfig:
     bsz: int = 1
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ModelConfig":
+    def from_dict(cls, data: dict) -> "GPT2Config":
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
 
 class LayerNorm(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: GPT2Config):
         super().__init__()
         self.ln_eps = config.layer_norm_epsilon
         self.weight = nn.Parameter(torch.ones(config.n_embd))
@@ -48,7 +48,7 @@ class LayerNorm(nn.Module):
 
 
 class MHA(nn.Module):
-    def __init__(self, config: ModelConfig, _layer_id: int):
+    def __init__(self, config: GPT2Config, _layer_id: int):
         super().__init__()
 
         assert config.n_embd % config.n_head == 0
@@ -197,7 +197,7 @@ class MHA(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: GPT2Config):
         super().__init__()
         self.c_fc = nn.Linear(config.n_embd, config.n_embd * 4)
         self.c_proj = nn.Linear(config.n_embd * 4, config.n_embd)
@@ -208,7 +208,7 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, config: ModelConfig, _layer_id: int):
+    def __init__(self, config: GPT2Config, _layer_id: int):
         super().__init__()
         self.attn = MHA(config, _layer_id)
         self.mlp = MLP(config)
@@ -233,7 +233,7 @@ class Block(nn.Module):
 
 
 class GPT2(nn.Module, Model):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: GPT2Config):
         super().__init__()
         self.config = config
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
@@ -302,7 +302,7 @@ class GPT2(nn.Module, Model):
             if any(k.endswith(_) for _ in transposed):
                 sd[k] = sd[k].t()
 
-        model_cfg = ModelConfig.from_dict(config.to_dict())
+        model_cfg = GPT2Config.from_dict(config.to_dict())
         model_instance = GPT2(model_cfg)
         model_instance.load_state_dict(sd, strict=False)
         return model_instance
