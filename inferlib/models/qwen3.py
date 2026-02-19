@@ -405,7 +405,7 @@ class Qwen3(nn.Module, Model):
         batch = torch.tensor([[seq.last_token_id] for seq in sequences])
         batch = batch.to(device=self.embed_tokens.weight.device)
         start_positions = torch.tensor(
-            [len(seq) for seq in sequences], device=self.embed_tokens.weight.device
+            [len(seq) - 1 for seq in sequences], device=self.embed_tokens.weight.device
         )
         logits: Tensor = self(
             batch,
