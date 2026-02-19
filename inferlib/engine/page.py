@@ -122,7 +122,7 @@ class PageManager:
         for page_id in self._page_table[sequence.s_id]:
             length = self.page_size
             if page_id == self._page_table[sequence.s_id][-1]:
-                rem = len(sequence) % self.page_size
+                rem = (len(sequence) - 1) % self.page_size
                 length = self.page_size if rem == 0 else rem
 
             yield self._page_pool.read(page_id, layer_id, length)
