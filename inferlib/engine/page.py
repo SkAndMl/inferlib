@@ -112,7 +112,7 @@ class PageManager:
         self._page_pool.write(
             self._page_table[sequence.s_id][-1],
             layer_id,
-            (sequence.sequence_length - 1) % self.page_size,
+            (len(sequence) - 1) % self.page_size,
             kv,
         )
 
@@ -122,7 +122,7 @@ class PageManager:
         for page_id in self._page_table[sequence.s_id]:
             length = self.page_size
             if page_id == self._page_table[sequence.s_id][-1]:
-                rem = sequence.sequence_length % self.page_size
+                rem = len(sequence) % self.page_size
                 length = self.page_size if rem == 0 else rem
 
             yield self._page_pool.read(page_id, layer_id, length)
@@ -135,7 +135,7 @@ class PageManager:
         for i, page_id in enumerate(page_ids):
             length = self.page_size
             if page_id == page_ids[-1]:
-                rem = sequence.sequence_length % self.page_size
+                rem = len(sequence) % self.page_size
                 length = self.page_size if rem == 0 else rem
 
             _k = k[:, i * self.page_size : (i + 1) * self.page_size, :]

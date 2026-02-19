@@ -117,6 +117,6 @@ class Scheduler:
     def _calculate_pages_needed(self, sequence: Sequence) -> int:
         # not prefilled yet
         if sequence.last_token_id == -1:
-            return math.ceil(sequence.sequence_length / self._page_size)
+            return math.ceil(len(sequence) / self._page_size)
 
-        return int(not sequence.sequence_length % self._page_size)
+        return int(not len(sequence) % self._page_size)
