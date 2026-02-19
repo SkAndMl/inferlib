@@ -42,10 +42,10 @@ class InferlibEngine:
         if self._task is None:
             raise RuntimeError("Engine not started")
 
-        assert "message" in payload
+        assert "chat_history" in payload
         assert "id" in payload
         prompt_tokens: list[int] = self.tokenizer.apply_chat_template(
-            conversation=[{"role": "user", "content": payload["message"]}],
+            conversation=payload["chat_history"],
             tokenize=True,
             add_generation_prompt=True,
             enable_thinking=False,

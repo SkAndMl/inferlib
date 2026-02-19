@@ -12,8 +12,9 @@ _engine: InferlibEngine | None = None
 
 
 class Payload(BaseModel):
-    message: str
     id: str
+    session_id: str
+    chat_history: list[dict[str, str]]
 
 
 @asynccontextmanager
