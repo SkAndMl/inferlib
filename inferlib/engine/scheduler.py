@@ -1,3 +1,4 @@
+import asyncio
 import math
 from collections import defaultdict, deque
 from typing import Literal
@@ -32,19 +33,24 @@ class Bucket:
                     self._buckets[bucket_idx].appendleft(sequence)
             self._total_sequences += 1
 
-    def get_batch(self, batch_size: int) -> list[Sequence]:
+    def get(self, bucket_idx: int) -> Sequence | None:
         if len(self) == 0:
-            return []
+            return None
 
-        max_idx = max(self._buckets, key=lambda k: len(self._buckets[k]))
-        batch = []
-        while self._buckets[max_idx] and len(batch) < batch_size:
-            batch.append(self._buckets[max_idx].popleft())
+        if len(self._buckets[bucket_idx]) > 0:
             self._total_sequences -= 1
-        return batch
+            return self._buckets[bucket_idx].popleft()
+
+        return None
 
     def __len__(self):
         return self._total_sequences
+
+    @property
+    def max_freq_bucket(self) -> int | None:
+        if len(self) == 0:
+            return None
+        return max(self._buckets, key=lambda k: len(self._buckets[k]))
 
 
 class Scheduler:
@@ -69,35 +75,63 @@ class Scheduler:
             sequences.append(self.finished_sequences.popleft())
         return sequences
 
-    def schedule(self) -> list[Sequence]:
-        logger.debug("scheduling...")
-        batch = []
-        if len(self.decode_sequences) > 0:
-            while self.decode_sequences and len(batch) < self.batch_size:
-                seq = self.decode_sequences.popleft()
+    async def schedule(self) -> list[Sequence]:
+        if self.decode_sequences:
+            return await self._get_decode_batch()
 
-                pages_needed = self._calculate_pages_needed(seq)
-                if pages_needed:
-                    if not self.page_manager.can_allocate(seq.s_id, pages_needed):
-                        self.decode_sequences.appendleft(seq)
-                        break
+        return await self._get_prefill_batch()
 
-                seq.state = SequenceState.RUNNING
-                batch.append(seq)
-            logger.debug(f"scheduled {len(batch)} decode sequences")
+    async def _get_decode_batch(self) -> list[Sequence]:
+        batch: list[Sequence] = []
+        awaited = False
+        while len(batch) < self.batch_size:
+            if not self.decode_sequences:
+                if awaited:
+                    break
+
+                awaited = True
+                await asyncio.sleep(0.1)
+                continue
+
+            seq = self.decode_sequences.popleft()
+            pages_needed = self._calculate_pages_needed(sequence=seq)
+            if pages_needed and not self.page_manager.can_allocate(
+                s_id=seq.s_id, num_pages=pages_needed
+            ):
+                self.decode_sequences.appendleft(seq)
+                break
+
+            seq.state = SequenceState.RUNNING
+            batch.append(seq)
+
+        return batch
+
+    async def _get_prefill_batch(self) -> list[Sequence]:
+        batch: list[Sequence] = []
+        bucket_idx = self.prefill_bucket.max_freq_bucket
+
+        if bucket_idx is None:
             return batch
 
-        prefill_batch = self.prefill_bucket.get_batch(self.batch_size)
-        for i, sequence in enumerate(prefill_batch):
-            pages_needed = self._calculate_pages_needed(sequence)
+        awaited = False
+        while len(batch) < self.batch_size:
+            sequence = self.prefill_bucket.get(bucket_idx)
+            if sequence is None:
+                if awaited:
+                    break
+
+                awaited = True
+                await asyncio.sleep(0.1)
+                continue
+
+            pages_needed = self._calculate_pages_needed(sequence=sequence)
             if not self.page_manager.can_allocate(sequence.s_id, pages_needed):
-                self.prefill_bucket.add(prefill_batch[i:][::-1], append="left")
+                self.prefill_bucket.add(sequences=sequence, append="left")
                 break
 
             sequence.state = SequenceState.RUNNING
             batch.append(sequence)
 
-        logger.debug(f"scheduled {len(batch)} prefill sequences")
         return batch
 
     def update(self, sequences: list[Sequence]):

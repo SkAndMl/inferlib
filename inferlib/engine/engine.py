@@ -83,7 +83,7 @@ class InferlibEngine:
     async def _worker_loop(self):
         while True:
             try:
-                batch = self.scheduler.schedule()
+                batch = await self.scheduler.schedule()
                 if not batch:
                     await asyncio.sleep(0.1)
                     continue
