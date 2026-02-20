@@ -117,21 +117,22 @@ class Qwen3Attention(nn.Module):
 
         self._layer_id = _layer_id
 
-    def _online_attention_one(
+    def _online_attention(
         self,
         q: Tensor,
         k: Tensor,
         v: Tensor,
-        sequence: Sequence,
+        sequences: list[Sequence],
         page_manager: PageManager,
     ) -> Tensor:
+        bsz = q.shape[0]
         running_denom = torch.zeros(
-            size=(self.cfg.num_attention_heads, 1, 1),
+            size=(bsz, self.cfg.num_attention_heads, 1, 1),
             device=q.device,
             dtype=torch.float32,
         )
         running_max = torch.ones(
-            size=(self.cfg.num_attention_heads, 1, 1),
+            size=(bsz, self.cfg.num_attention_heads, 1, 1),
             device=q.device,
             dtype=torch.float32,
         ) * float("-inf")
@@ -145,8 +146,30 @@ class Qwen3Attention(nn.Module):
             self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
         )
 
-        for k_i, v_i in page_manager.read_pages(sequence, self._layer_id):
-            kf, vf = k_i[None, ...].to(torch.float32), v_i[None, ...].to(torch.float32)
+        num_pages = page_manager.get_num_pages(sequences[0].s_id)
+
+        for i, (k_i, v_i) in enumerate(
+            page_manager.read_pages(sequences=sequences, layer_id=self._layer_id)
+        ):
+            if i == num_pages - 1:
+                lens = [(len(seq) - 1) % page_manager.page_size for seq in sequences]
+                lens = [_l if _l > 0 else page_manager.page_size for _l in lens]
+                lens = torch.tensor(
+                    lens,
+                    dtype=torch.long,
+                    device=q.device,
+                )
+                indices = torch.arange(
+                    page_manager.page_size, dtype=torch.long, device=q.device
+                ).unsqueeze(0)
+                mask = indices < lens.unsqueeze(1)
+            else:
+                mask = torch.ones(
+                    size=(q.shape[0], page_manager.page_size), device=q.device
+                ).bool()
+            mask = mask[:, None, None, :]  # bsz, 1, 1, pg_size
+
+            kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
             kf = kf.repeat_interleave(
                 self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
             )
@@ -156,14 +179,15 @@ class Qwen3Attention(nn.Module):
 
             S_i: Tensor = (qf @ kf.transpose(-2, -1)) / (
                 self.cfg.head_dim**0.5
-            )  # head_dim, 1, pg_size
+            )  # bsz, head_dim, 1, pg_size
+            S_i.masked_fill_(~mask, float("-inf"))
             max_i: Tensor = torch.max(
                 S_i, dim=-1, keepdim=True
             ).values  # bsz, head_dim, 1, 1
 
-            max_new = torch.maximum(running_max, max_i)  # head_dim, 1, 1
+            max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
             P_i = (S_i - max_new).exp()
-            denom_i = P_i.sum(dim=-1, keepdim=True)  # head_dim, 1, 1
+            denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
 
             alpha = (running_max - max_new).exp()
             running_denom = alpha * running_denom + denom_i
@@ -174,43 +198,21 @@ class Qwen3Attention(nn.Module):
 
         S_i: Tensor = (qf @ kf_cur.transpose(-2, -1)) / (
             self.cfg.head_dim**0.5
-        )  # head_dim, 1, pg_size
-        max_i: Tensor = torch.max(S_i, dim=-1, keepdim=True).values  # head_dim, 1, 1
+        )  # bsz, head_dim, 1, pg_size
+        max_i: Tensor = torch.max(
+            S_i, dim=-1, keepdim=True
+        ).values  # bsz, head_dim, 1, 1
 
-        max_new = torch.maximum(running_max, max_i)  # head_dim, 1, 1
+        max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
         P_i = (S_i - max_new).exp()
-        denom_i = P_i.sum(dim=-1, keepdim=True)  # head_dim, 1, 1
+        denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
 
         alpha = (running_max - max_new).exp()
         running_denom = alpha * running_denom + denom_i
         y = y * alpha + (P_i @ vf_cur)
         y /= running_denom
 
-        page_manager.write(sequence, self._layer_id, (k, v))
-        return y.to(q.dtype)
-
-    def _online_attention(
-        self,
-        q: Tensor,
-        k: Tensor,
-        v: Tensor,
-        sequences: list[Sequence],
-        page_manager: PageManager,
-    ) -> Tensor:
-        assert q.shape[2] == k.shape[2] == v.shape[2] == 1
-
-        ys = []
-        for i, sequence in enumerate(sequences):
-            ys.append(
-                self._online_attention_one(
-                    q[i : i + 1, ...],
-                    k[i : i + 1, ...],
-                    v[i : i + 1, ...],
-                    sequence=sequence,
-                    page_manager=page_manager,
-                )
-            )
-        y = torch.stack(ys).squeeze(1)
+        page_manager.write(sequences, self._layer_id, (k, v))
         return y.to(q.dtype)
 
     def forward(
