@@ -3,7 +3,6 @@ import torch
 
 from asyncio import Queue
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from typing import Any
 
 from inferlib.models import Qwen3
 
@@ -38,20 +37,18 @@ class InferlibEngine:
 
         self._eot_token = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
 
-    def add_request(self, payload: dict[str, Any]) -> Queue:
+    def add_request(self, chat_history: list[dict[str, str]], chat_id: str) -> Queue:
         if self._task is None:
             raise RuntimeError("Engine not started")
 
-        assert "chat_history" in payload
-        assert "id" in payload
         prompt_tokens: list[int] = self.tokenizer.apply_chat_template(
-            conversation=payload["chat_history"],
+            conversation=chat_history,
             tokenize=True,
             add_generation_prompt=True,
             enable_thinking=False,
         )
         sequence = Sequence(
-            s_id=payload["id"],
+            s_id=chat_id,
             prompt_tokens=prompt_tokens,
             completion_tokens=[],
             eos_token_id=self._eot_token,
@@ -59,7 +56,7 @@ class InferlibEngine:
         )
         self.scheduler.add_request(sequence)
         q = Queue()
-        self._sequence_to_queue[payload["id"]] = q
+        self._sequence_to_queue[chat_id] = q
         return q
 
     async def start(self):
