@@ -222,8 +222,10 @@ class Qwen3Attention(nn.Module):
         page_manager: PageManager,
         prefill: bool = False,
         start_positions: Tensor = None,
+        mask: Tensor = None,
     ) -> Tensor:
         B, T, D = x.shape
+
         q: Tensor = self.q_proj(x)
         k: Tensor = self.k_proj(x)
         v: Tensor = self.v_proj(x)
@@ -269,13 +271,19 @@ class Qwen3Attention(nn.Module):
                 self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
             )
 
-            mask: Tensor = torch.full(
-                size=(T, T), fill_value=float("-inf"), device=x.device, dtype=x.dtype
-            ).triu(1)
+            if mask is None:
+                mask: Tensor = torch.full(
+                    size=(1, T, T),
+                    fill_value=1,
+                    device=x.device,
+                    dtype=torch.bool,
+                ).tril(0)
+            else:
+                assert mask.shape == (B, T, T)
 
             attn: Tensor = q @ k.transpose(2, 3) / self.cfg.head_dim**0.5
-            attn += mask
-            attn = F.softmax(attn.float(), dim=-1).to(q.dtype)
+            attn.masked_fill_(~mask[:, None, ...], value=float("-inf"))
+            attn = F.softmax(attn.float(), dim=-1).to(q.dtype).nan_to_num(nan=0.0)
             attn = F.dropout(attn, p=self.cfg.attention_dropout, training=self.training)
 
             y: Tensor = attn @ v  # B, N_Q_HEADS, T, HEAD_DIM
@@ -318,6 +326,7 @@ class Qwen3DecoderLayer(nn.Module):
         page_manager: PageManager,
         prefill: bool = False,
         start_positions: Tensor = None,
+        mask: Tensor = None,
     ) -> Tensor:
         x = x + self.self_attn(
             self.input_layernorm(x),
@@ -325,6 +334,7 @@ class Qwen3DecoderLayer(nn.Module):
             page_manager=page_manager,
             prefill=prefill,
             start_positions=start_positions,
+            mask=mask,
         )
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
@@ -354,6 +364,7 @@ class Qwen3(nn.Module, Model):
         page_manager: PageManager,
         prefill: bool = False,
         start_positions: Tensor = None,
+        mask: Tensor = None,
     ) -> Tensor:
         x = self.embed_tokens(x)
         for layer in self.layers:
@@ -363,6 +374,7 @@ class Qwen3(nn.Module, Model):
                 page_manager=page_manager,
                 prefill=prefill,
                 start_positions=start_positions,
+                mask=mask,
             )
         return self.lm_head(self.norm(x))
 
@@ -383,22 +395,48 @@ class Qwen3(nn.Module, Model):
 
     @torch.inference_mode()
     def prefill(
-        self, *, sequences: list[Sequence], page_manager: PageManager
+        self,
+        *,
+        sequences: list[Sequence],
+        page_manager: PageManager,
+        pad_token: int = 0,
     ) -> list[int]:
-        next_tokens: list[int] = []
-        for sequence in sequences:
-            batch = torch.tensor(
-                [sequence.prompt_tokens], device=self.embed_tokens.weight.device
+        B = len(sequences)
+        device = self.embed_tokens.weight.device
+        max_len = max(len(seq) for seq in sequences)
+        batch = torch.full(
+            size=(B, max_len),
+            fill_value=pad_token,
+            device=device,
+            dtype=torch.long,
+        )
+        mask = torch.full(
+            size=(B, max_len, max_len),
+            fill_value=1,
+            device=device,
+            dtype=torch.bool,
+        ).tril(0)
+        seq_lens = torch.zeros(size=(len(sequences),), device=device, dtype=torch.long)
+        for i, sequence in enumerate(sequences):
+            seq_lens[i] = len(sequence)
+            batch[i, : len(sequence)] = torch.tensor(
+                sequence.prompt_tokens, device=device
             )
-            logits: Tensor = self(
-                batch,
-                sequences=[sequence],
-                page_manager=page_manager,
-                prefill=True,
-                start_positions=None,
-            )
-            next_tokens.append(logits[:, -1, :].argmax(dim=-1).squeeze().item())
-        return next_tokens
+            mask[i, len(sequence) :, len(sequence) :] = 0
+
+        logits: Tensor = self(
+            batch,
+            sequences=sequences,
+            page_manager=page_manager,
+            prefill=True,
+            start_positions=None,
+            mask=mask,
+        )  # bsz, max_len, embed_dim
+
+        row_idx = torch.arange(B, device=device)
+        last_idx = seq_lens - 1
+        next_tokens = logits[row_idx, last_idx, :].argmax(dim=-1)
+        return next_tokens.tolist()
 
     @torch.inference_mode()
     def decode(
