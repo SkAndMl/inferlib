@@ -8,7 +8,7 @@ from inferlib.engine.sequence import Sequence, SequenceState
 from inferlib.log import logger
 
 
-class Bucket:
+class _Bucket:
     def __init__(self, page_size: int):
         self.page_size = page_size
         self._buckets: dict[int, deque[Sequence]] = defaultdict(deque)
@@ -46,6 +46,9 @@ class Bucket:
     def __len__(self):
         return self._total_sequences
 
+    def __bool__(self):
+        return self._total_sequences > 0
+
     @property
     def max_freq_bucket(self) -> int | None:
         if len(self) == 0:
@@ -58,8 +61,8 @@ class Scheduler:
         self.page_manager = page_manager
         self._page_size = page_manager.page_size
         self.batch_size = batch_size
-        self.prefill_bucket = Bucket(self._page_size)
-        self.decode_sequences: deque[Sequence] = deque()
+        self.prefill_bucket = _Bucket(self._page_size)
+        self.decode_bucket = _Bucket(self._page_size)
         self.finished_sequences: deque[Sequence] = deque()
 
     def add_request(self, sequence: Sequence):
@@ -76,46 +79,23 @@ class Scheduler:
         return sequences
 
     async def schedule(self) -> list[Sequence]:
-        if self.decode_sequences:
-            return await self._get_decode_batch()
+        if self.decode_bucket:
+            return await self._get_batch("decode")
 
-        return await self._get_prefill_batch()
+        return await self._get_batch("prefill")
 
-    async def _get_decode_batch(self) -> list[Sequence]:
+    async def _get_batch(
+        self, bucket_type: Literal["prefill", "decode"]
+    ) -> list[Sequence]:
         batch: list[Sequence] = []
-        awaited = False
-        while len(batch) < self.batch_size:
-            if not self.decode_sequences:
-                if awaited:
-                    break
-
-                awaited = True
-                await asyncio.sleep(0.1)
-                continue
-
-            seq = self.decode_sequences.popleft()
-            pages_needed = self._calculate_pages_needed(sequence=seq)
-            if pages_needed and not self.page_manager.can_allocate(
-                s_id=seq.s_id, num_pages=pages_needed
-            ):
-                self.decode_sequences.appendleft(seq)
-                break
-
-            seq.state = SequenceState.RUNNING
-            batch.append(seq)
-
-        return batch
-
-    async def _get_prefill_batch(self) -> list[Sequence]:
-        batch: list[Sequence] = []
-        bucket_idx = self.prefill_bucket.max_freq_bucket
-
+        bucket = self.prefill_bucket if bucket_type == "prefill" else self.decode_bucket
+        bucket_idx = bucket.max_freq_bucket
         if bucket_idx is None:
             return batch
 
         awaited = False
         while len(batch) < self.batch_size:
-            sequence = self.prefill_bucket.get(bucket_idx)
+            sequence = bucket.get(bucket_idx)
             if sequence is None:
                 if awaited:
                     break
@@ -126,7 +106,7 @@ class Scheduler:
 
             pages_needed = self._calculate_pages_needed(sequence=sequence)
             if not self.page_manager.can_allocate(sequence.s_id, pages_needed):
-                self.prefill_bucket.add(sequences=sequence, append="left")
+                bucket.add(sequences=sequence, append="left")
                 break
 
             sequence.state = SequenceState.RUNNING
@@ -146,7 +126,7 @@ class Scheduler:
                 continue
 
             sequence.state = SequenceState.WAITING
-            self.decode_sequences.append(sequence)
+            self.decode_bucket.add(sequence)
 
     def _calculate_pages_needed(self, sequence: Sequence) -> int:
         # not prefilled yet

@@ -30,32 +30,31 @@ class PagePool:
         self._value_pool = torch.empty(size=size, dtype=self.dtype, device=self.device)
 
     def write(
-        self, page_id: int, layer_id: int, offset: int, kv: tuple[Tensor, Tensor]
+        self,
+        page_ids: Tensor,
+        layer_id: int,
+        offsets: Tensor,
+        kv: tuple[Tensor, Tensor],
     ):
         assert layer_id < self.num_layers
-        assert offset < self.page_size
+        assert (offsets < self.page_size).all()
 
         k, v = kv
 
-        assert k.shape == v.shape == (1, self.num_heads, 1, self.head_dim)
+        assert k.shape == v.shape == (len(page_ids), self.num_heads, 1, self.head_dim)
 
-        self._key_pool[page_id, layer_id, :, offset : offset + 1, :] = k[0]
-        self._value_pool[page_id, layer_id, :, offset : offset + 1, :] = v[0]
+        self._key_pool[page_ids, layer_id, :, offsets, :] = k.squeeze(dim=2)
+        self._value_pool[page_ids, layer_id, :, offsets, :] = v.squeeze(dim=2)
 
-    def write_page(self, page_id: int, layer_id: int, kv: tuple[Tensor, Tensor]):
-        length = kv[0].shape[1]
-        self._key_pool[page_id, layer_id, :, :length, :] = kv[0]
-        self._value_pool[page_id, layer_id, :, :length, :] = kv[1]
+    def write_page(self, page_ids: Tensor, layer_id: int, kv: tuple[Tensor, Tensor]):
+        length = kv[0].shape[2]
+        self._key_pool[page_ids, layer_id, :, :length, :] = kv[0]
+        self._value_pool[page_ids, layer_id, :, :length, :] = kv[1]
 
-    def read(
-        self, page_id: int, layer_id: int, length: int | None = None
-    ) -> tuple[Tensor, Tensor]:
+    def read(self, page_id: Tensor, layer_id: int) -> tuple[Tensor, Tensor]:
         assert layer_id < self.num_layers
-        if length is None:
-            length = self.page_size
-
-        k = self._key_pool[page_id, layer_id, :, :length, :]
-        v = self._value_pool[page_id, layer_id, :, :length, :]
+        k = self._key_pool[page_id, layer_id, ...]
+        v = self._value_pool[page_id, layer_id, ...]
         return k, v
 
 
@@ -105,50 +104,66 @@ class PageManager:
 
     def write(
         self,
-        sequence: Sequence,
+        sequences: list[Sequence],
         layer_id: int,
         kv: tuple[Tensor, Tensor],
     ):
+        page_ids = torch.tensor(
+            [self._page_table[seq.s_id][-1] for seq in sequences],
+            device=self.device,
+            dtype=torch.long,
+        )
+        offsets = torch.tensor(
+            data=[(len(seq) - 1) % self.page_size for seq in sequences],
+            dtype=torch.long,
+            device=self.device,
+        )
         self._page_pool.write(
-            self._page_table[sequence.s_id][-1],
-            layer_id,
-            (len(sequence) - 1) % self.page_size,
-            kv,
+            page_ids=page_ids,
+            layer_id=layer_id,
+            offsets=offsets,
+            kv=kv,
         )
 
     def read_pages(
-        self, sequence: Sequence, layer_id: int
+        self, sequences: Sequence | list[Sequence], layer_id: int
     ) -> Iterator[tuple[Tensor, Tensor]]:
-        for page_id in self._page_table[sequence.s_id]:
-            length = self.page_size
-            if page_id == self._page_table[sequence.s_id][-1]:
-                rem = (len(sequence) - 1) % self.page_size
-                length = self.page_size if rem == 0 else rem
+        if isinstance(sequences, Sequence):
+            sequences = [sequences]
 
-            yield self._page_pool.read(page_id, layer_id, length)
+        num_pages = len(self._page_table[sequences[0].s_id])
+        assert all(len(self._page_table[seq.s_id]) == num_pages for seq in sequences)
 
-    def _prefill_one(
-        self, sequence: Sequence, layer_id: int, kv: tuple[Tensor, Tensor]
-    ):
-        page_ids = self._page_table[sequence.s_id]
-        k, v = kv
-        for i, page_id in enumerate(page_ids):
-            length = self.page_size
-            if page_id == page_ids[-1]:
-                rem = len(sequence) % self.page_size
-                length = self.page_size if rem == 0 else rem
+        for i in range(num_pages):
+            page_ids = torch.tensor(
+                [self._page_table[seq.s_id][i] for seq in sequences],
+                device=self.device,
+                dtype=torch.long,
+            )
 
-            _k = k[:, i * self.page_size : (i + 1) * self.page_size, :]
-            _v = v[:, i * self.page_size : (i + 1) * self.page_size, :]
-            _k, _v = _k[:, :length, :], _v[:, :length, :]
-            self._page_pool.write_page(page_id, layer_id, (_k, _v))
+            yield self._page_pool.read(page_ids, layer_id)
 
     def prefill(
         self, sequences: list[Sequence], layer_id: int, kv: tuple[Tensor, Tensor]
     ):
         k, v = kv
-        for i, sequence in enumerate(sequences):
-            self._prefill_one(sequence, layer_id, (k[i, ...], v[i, ...]))
+        num_pages = len(self._page_table[sequences[0].s_id])
+        assert all(len(self._page_table[seq.s_id]) == num_pages for seq in sequences)
+
+        for i in range(num_pages):
+            page_ids = torch.tensor(
+                [self._page_table[seq.s_id][i] for seq in sequences],
+                dtype=torch.long,
+                device=self.device,
+            )
+            _k = k[:, :, i * self.page_size : (i + 1) * self.page_size, :]
+            _v = v[:, :, i * self.page_size : (i + 1) * self.page_size, :]
+            self._page_pool.write_page(
+                page_ids=page_ids, layer_id=layer_id, kv=(_k, _v)
+            )
+
+    def get_num_pages(self, s_id: int) -> int:
+        return len(self._page_table.get(s_id, []))
 
 
 __all__ = ["PageManager"]
