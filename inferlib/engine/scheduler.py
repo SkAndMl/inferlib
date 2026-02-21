@@ -63,7 +63,6 @@ class Scheduler:
         self.batch_size = batch_size
         self.prefill_bucket = _Bucket(self._page_size)
         self.decode_bucket = _Bucket(self._page_size)
-        self.finished_sequences: deque[Sequence] = deque()
 
     def add_request(self, sequence: Sequence):
         sequence.state = SequenceState.WAITING
@@ -71,12 +70,6 @@ class Scheduler:
         logger.debug(
             f"sequence: {sequence.s_id} added; # prefill: {len(self.prefill_bucket)}"
         )
-
-    def get_finished_sequences(self) -> list[Sequence]:
-        sequences = []
-        while len(self.finished_sequences) > 0:
-            sequences.append(self.finished_sequences.popleft())
-        return sequences
 
     async def schedule(self) -> list[Sequence]:
         if self.decode_bucket:
@@ -116,12 +109,10 @@ class Scheduler:
 
     def update(self, sequences: list[Sequence]):
         assert all(sequence.last_token_id != -1 for sequence in sequences)
-        while sequences:
-            sequence = sequences.pop()
+        for sequence in sequences:
             if sequence.is_finished:
                 sequence.state = SequenceState.FINISHED
                 self.page_manager.free(sequence.s_id)
-                self.finished_sequences.append(sequence)
                 logger.info(f"{sequence.s_id} finished...")
                 continue
 

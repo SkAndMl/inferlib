@@ -137,6 +137,66 @@
 
         .message.assistant .message-content {
             background: transparent;
+            white-space: normal;
+        }
+
+        .message.assistant .message-content p {
+            margin: 0 0 10px;
+        }
+
+        .message.assistant .message-content p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message.assistant .message-content h1,
+        .message.assistant .message-content h2,
+        .message.assistant .message-content h3,
+        .message.assistant .message-content h4,
+        .message.assistant .message-content h5,
+        .message.assistant .message-content h6 {
+            margin: 0 0 10px;
+            line-height: 1.35;
+        }
+
+        .message.assistant .message-content ul,
+        .message.assistant .message-content ol {
+            margin: 0 0 10px;
+            padding-left: 20px;
+        }
+
+        .message.assistant .message-content code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            background: #f3f4f6;
+            border-radius: 6px;
+            padding: 1px 5px;
+            font-size: 0.92em;
+        }
+
+        .message.assistant .message-content pre {
+            margin: 0 0 10px;
+            overflow-x: auto;
+            background: #111827;
+            color: #f9fafb;
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .message.assistant .message-content pre code {
+            background: transparent;
+            padding: 0;
+            color: inherit;
+        }
+
+        .message.assistant .message-content blockquote {
+            margin: 0 0 10px;
+            padding-left: 12px;
+            border-left: 3px solid #d1d5db;
+            color: #4b5563;
+        }
+
+        .message.assistant .message-content a {
+            color: #1d4ed8;
+            text-decoration: underline;
         }
 
         .message.error .message-content {
@@ -329,13 +389,174 @@
             textarea.focus();
         }
 
+        function escapeHtml(text) {
+            return String(text)
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#39;");
+        }
+
+        function applyInlineMarkdown(text) {
+            const codeSpans = [];
+            let transformed = text.replace(/`([^`]+)`/g, (_, code) => {
+                const token = `@@INLINE_${codeSpans.length}@@`;
+                codeSpans.push(`<code>${code}</code>`);
+                return token;
+            });
+
+            transformed = transformed.replace(
+                /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+            );
+            transformed = transformed.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+            transformed = transformed.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+            transformed = transformed.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+            return transformed.replace(/@@INLINE_(\d+)@@/g, (_, idx) => {
+                return codeSpans[Number(idx)] || "";
+            });
+        }
+
+        function markdownToHtml(markdown) {
+            const codeBlocks = [];
+            const normalized = String(markdown ?? "").replace(/\r\n/g, "\n");
+            const withPlaceholders = normalized.replace(
+                /```([\w-]+)?\n([\s\S]*?)```/g,
+                (_, lang = "", code) => {
+                    const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
+                    const safeCode = escapeHtml(code.replace(/\n$/, ""));
+                    const safeLang = escapeHtml(lang);
+                    codeBlocks.push(
+                        `<pre><code${safeLang ? ` class="language-${safeLang}"` : ""}>${safeCode}</code></pre>`
+                    );
+                    return `\n${token}\n`;
+                }
+            );
+
+            const escaped = escapeHtml(withPlaceholders);
+            const lines = escaped.split("\n");
+            const htmlParts = [];
+            let paragraphLines = [];
+            let inUl = false;
+            let inOl = false;
+
+            function flushParagraph() {
+                if (!paragraphLines.length) {
+                    return;
+                }
+                htmlParts.push(`<p>${paragraphLines.join("<br>")}</p>`);
+                paragraphLines = [];
+            }
+
+            function closeLists() {
+                if (inUl) {
+                    htmlParts.push("</ul>");
+                    inUl = false;
+                }
+                if (inOl) {
+                    htmlParts.push("</ol>");
+                    inOl = false;
+                }
+            }
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+
+                if (!trimmed) {
+                    flushParagraph();
+                    closeLists();
+                    continue;
+                }
+
+                const codeBlockMatch = trimmed.match(/^@@CODEBLOCK_(\d+)@@$/);
+                if (codeBlockMatch) {
+                    flushParagraph();
+                    closeLists();
+                    htmlParts.push(trimmed);
+                    continue;
+                }
+
+                const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+                if (headingMatch) {
+                    flushParagraph();
+                    closeLists();
+                    const level = headingMatch[1].length;
+                    htmlParts.push(
+                        `<h${level}>${applyInlineMarkdown(headingMatch[2])}</h${level}>`
+                    );
+                    continue;
+                }
+
+                const ulMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+                if (ulMatch) {
+                    flushParagraph();
+                    if (inOl) {
+                        htmlParts.push("</ol>");
+                        inOl = false;
+                    }
+                    if (!inUl) {
+                        htmlParts.push("<ul>");
+                        inUl = true;
+                    }
+                    htmlParts.push(`<li>${applyInlineMarkdown(ulMatch[1])}</li>`);
+                    continue;
+                }
+
+                const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+                if (olMatch) {
+                    flushParagraph();
+                    if (inUl) {
+                        htmlParts.push("</ul>");
+                        inUl = false;
+                    }
+                    if (!inOl) {
+                        htmlParts.push("<ol>");
+                        inOl = true;
+                    }
+                    htmlParts.push(`<li>${applyInlineMarkdown(olMatch[1])}</li>`);
+                    continue;
+                }
+
+                const quoteMatch = trimmed.match(/^>\s?(.+)$/);
+                if (quoteMatch) {
+                    flushParagraph();
+                    closeLists();
+                    htmlParts.push(
+                        `<blockquote>${applyInlineMarkdown(quoteMatch[1])}</blockquote>`
+                    );
+                    continue;
+                }
+
+                closeLists();
+                paragraphLines.push(applyInlineMarkdown(trimmed));
+            }
+
+            flushParagraph();
+            closeLists();
+
+            const html = htmlParts.join("");
+            return html.replace(/@@CODEBLOCK_(\d+)@@/g, (_, idx) => {
+                return codeBlocks[Number(idx)] || "";
+            });
+        }
+
+        function renderMessageContent(contentDiv, role, content, isError = false) {
+            if (role === "assistant" && !isError) {
+                contentDiv.innerHTML = markdownToHtml(content);
+                return;
+            }
+            contentDiv.textContent = content;
+        }
+
         function addMessage(role, content, streaming = false, isError = false) {
             const messageDiv = document.createElement("div");
             messageDiv.className = `message ${role}${isError ? " error" : ""}`;
 
             const contentDiv = document.createElement("div");
             contentDiv.className = "message-content";
-            contentDiv.textContent = content;
+            renderMessageContent(contentDiv, role, content, isError);
 
             if (streaming) {
                 contentDiv.id = "streaming-message";
@@ -355,7 +576,67 @@
                     role: message.role,
                     content: message.content,
                 })),
+                stream: true,
             };
+        }
+
+        function consumeSseEvent(eventText, onChunk) {
+            const lines = eventText.split(/\r?\n/);
+            for (const line of lines) {
+                if (!line.startsWith("data:")) {
+                    continue;
+                }
+
+                const raw = line.slice(5).trim();
+                if (!raw || raw === "[DONE]") {
+                    continue;
+                }
+
+                const payload = JSON.parse(raw);
+                if (typeof payload.message === "string") {
+                    onChunk(payload.message);
+                }
+            }
+        }
+
+        async function streamCompletion(payload, onChunk) {
+            const response = await fetch(`${API_URL}/v1/chat/completions`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error ${response.status}`);
+            }
+            if (!response.body) {
+                throw new Error("Readable stream not available in response");
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                const events = buffer.split(/\r?\n\r?\n/);
+                buffer = events.pop() ?? "";
+                for (const eventText of events) {
+                    consumeSseEvent(eventText, onChunk);
+                }
+            }
+
+            buffer += decoder.decode();
+            if (buffer.trim()) {
+                consumeSseEvent(buffer, onChunk);
+            }
         }
 
         async function sendMessage() {
@@ -383,27 +664,17 @@
             loadingDiv.appendChild(loadingSpan);
 
             try {
-                const response = await fetch(`${API_URL}/chat`, {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify(getPayload()),
+                let assistantMessage = "";
+                await streamCompletion(getPayload(), (chunk) => {
+                    if (loadingSpan.parentElement) {
+                        loadingSpan.remove();
+                    }
+                    assistantMessage += chunk;
+                    renderMessageContent(loadingDiv, "assistant", assistantMessage);
+                    chatContainer.scrollTop = chatContainer.scrollHeight;
                 });
 
-                if (!response.ok) {
-                    throw new Error(`HTTP error ${response.status}`);
-                }
-
-                const data = await response.json();
-                const assistantMessage =
-                    typeof data.message === "string"
-                        ? data.message
-                        : typeof data.response === "string"
-                        ? data.response
-                        : "";
-
-                loadingDiv.textContent = assistantMessage;
+                renderMessageContent(loadingDiv, "assistant", assistantMessage);
                 loadingDiv.removeAttribute("id");
                 conversationHistory.push({
                     role: "assistant",
