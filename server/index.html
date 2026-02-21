@@ -1,0 +1,1142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>inferlib</title>
+    <style>
+        :root {
+            --bg: #f7f7f8;
+            --panel: #ffffff;
+            --text: #1f1f1f;
+            --muted: #6b7280;
+            --line: #e5e7eb;
+            --sidebar: #f4f4f5;
+            --user-bubble: #303030;
+            --user-text: #ffffff;
+            --btn: #111111;
+            --btn-hover: #000000;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            font-family: "Inter", "Segoe UI", Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
+            color: var(--text);
+            background: var(--bg);
+        }
+
+        .app {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            width: 280px;
+            background: var(--sidebar);
+            border-right: 1px solid var(--line);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+            transition: transform 0.2s ease, width 0.2s ease, border-right-color 0.2s ease;
+            z-index: 20;
+            overflow: hidden;
+        }
+
+        .app.sidebar-collapsed .sidebar {
+            width: 0;
+            border-right-color: transparent;
+        }
+
+        .sidebar-header {
+            padding: 12px;
+            border-bottom: 1px solid var(--line);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .brand {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .new-chat-btn {
+            margin-left: auto;
+            border: 1px solid var(--line);
+            background: #fff;
+            border-radius: 10px;
+            padding: 8px 12px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .new-chat-btn:hover {
+            background: #f9fafb;
+        }
+
+        .sidebar-label {
+            padding: 12px 14px 8px;
+            font-size: 12px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .chat-list {
+            padding: 0 8px 10px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .chat-row {
+            position: relative;
+        }
+
+        .chat-item {
+            width: 100%;
+            border: 1px solid transparent;
+            border-radius: 10px;
+            padding: 9px 36px 9px 10px;
+            cursor: pointer;
+            background: transparent;
+            text-align: left;
+            color: inherit;
+        }
+
+        .chat-item:hover {
+            background: #eceef1;
+        }
+
+        .chat-item.active {
+            background: #e5e7eb;
+            border-color: #d1d5db;
+        }
+
+        .chat-item-title {
+            font-size: 14px;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .chat-item-preview {
+            margin-top: 4px;
+            font-size: 12px;
+            color: var(--muted);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .chat-delete-btn {
+            position: absolute;
+            top: 7px;
+            right: 8px;
+            width: 22px;
+            height: 22px;
+            border-radius: 6px;
+            border: none;
+            background: transparent;
+            color: #6b7280;
+            font-size: 16px;
+            line-height: 1;
+            cursor: pointer;
+            opacity: 0;
+            transition: opacity 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+        }
+
+        .chat-row:hover .chat-delete-btn,
+        .chat-item.active + .chat-delete-btn {
+            opacity: 1;
+        }
+
+        .chat-delete-btn:hover {
+            background: #e5e7eb;
+            color: #111827;
+        }
+
+        .main {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg);
+        }
+
+        .topbar {
+            height: 56px;
+            flex-shrink: 0;
+            border-bottom: 1px solid var(--line);
+            background: var(--panel);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 0 16px;
+        }
+
+        .menu-btn {
+            border: 1px solid var(--line);
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: #fff;
+            cursor: pointer;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            line-height: 1;
+        }
+
+        .top-title {
+            font-size: 15px;
+            font-weight: 600;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .chat-scroll {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .chat-content {
+            width: 100%;
+            max-width: 840px;
+            margin: 0 auto;
+            padding: 26px 18px 130px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+            min-height: 100%;
+        }
+
+        .empty-state {
+            margin: auto;
+            padding: 40px 12px;
+            text-align: center;
+            color: #111827;
+            font-size: 40px;
+            line-height: 1.1;
+            font-weight: 500;
+        }
+
+        .message-row {
+            display: flex;
+            width: 100%;
+        }
+
+        .message-row.user {
+            justify-content: flex-end;
+        }
+
+        .message {
+            max-width: min(100%, 720px);
+            border-radius: 18px;
+            padding: 12px 16px;
+            line-height: 1.65;
+            font-size: 15px;
+            word-wrap: break-word;
+            white-space: pre-wrap;
+        }
+
+        .message.user {
+            background: var(--user-bubble);
+            color: var(--user-text);
+        }
+
+        .message.assistant {
+            background: transparent;
+            color: var(--text);
+            padding-left: 0;
+            padding-right: 0;
+            white-space: normal;
+        }
+
+        .message.error {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .message.assistant p {
+            margin: 0 0 10px;
+        }
+
+        .message.assistant p:last-child {
+            margin-bottom: 0;
+        }
+
+        .message.assistant h1,
+        .message.assistant h2,
+        .message.assistant h3,
+        .message.assistant h4,
+        .message.assistant h5,
+        .message.assistant h6 {
+            margin: 0 0 10px;
+            line-height: 1.35;
+        }
+
+        .message.assistant ul,
+        .message.assistant ol {
+            margin: 0 0 10px;
+            padding-left: 22px;
+        }
+
+        .message.assistant code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            background: #f3f4f6;
+            border-radius: 6px;
+            padding: 1px 5px;
+            font-size: 0.92em;
+        }
+
+        .message.assistant pre {
+            margin: 0 0 10px;
+            overflow-x: auto;
+            background: #111827;
+            color: #f9fafb;
+            border-radius: 8px;
+            padding: 12px;
+        }
+
+        .message.assistant pre code {
+            background: transparent;
+            padding: 0;
+            color: inherit;
+        }
+
+        .message.assistant blockquote {
+            margin: 0 0 10px;
+            padding-left: 12px;
+            border-left: 3px solid #d1d5db;
+            color: #4b5563;
+        }
+
+        .message.assistant a {
+            color: #1d4ed8;
+            text-decoration: underline;
+        }
+
+        .composer-wrap {
+            position: fixed;
+            left: 280px;
+            right: 0;
+            bottom: 0;
+            border-top: 1px solid var(--line);
+            background: linear-gradient(to top, #f7f7f8 70%, rgba(247, 247, 248, 0));
+            padding: 16px 18px 18px;
+        }
+
+        .app.sidebar-collapsed .composer-wrap {
+            left: 0;
+        }
+
+        .composer {
+            max-width: 840px;
+            margin: 0 auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 24px;
+            padding: 10px 12px;
+            display: flex;
+            align-items: flex-end;
+            gap: 10px;
+            box-shadow: 0 2px 8px rgba(17, 24, 39, 0.05);
+        }
+
+        .input {
+            flex: 1;
+            border: none;
+            outline: none;
+            resize: none;
+            max-height: 220px;
+            min-height: 24px;
+            font-size: 18px;
+            line-height: 1.45;
+            font-family: inherit;
+            background: transparent;
+            padding: 6px 2px;
+        }
+
+        .send-btn {
+            width: 38px;
+            height: 38px;
+            border-radius: 999px;
+            border: none;
+            background: var(--btn);
+            color: #fff;
+            cursor: pointer;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+
+        .send-btn:hover:not(:disabled) {
+            background: var(--btn-hover);
+        }
+
+        .send-btn:disabled {
+            background: #d1d5db;
+            cursor: not-allowed;
+        }
+
+        .loading-dot {
+            display: inline-block;
+            width: 9px;
+            height: 9px;
+            border-radius: 999px;
+            background: #9ca3af;
+            animation: pulse 1.2s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 0.35;
+            }
+            50% {
+                opacity: 1;
+            }
+        }
+
+        .backdrop {
+            position: fixed;
+            inset: 0;
+            background: rgba(17, 24, 39, 0.32);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s ease;
+            z-index: 15;
+        }
+
+        .backdrop.show {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        @media (max-width: 900px) {
+            .sidebar {
+                position: fixed;
+                top: 0;
+                bottom: 0;
+                left: 0;
+                transform: translateX(-100%);
+                box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+            }
+
+            .sidebar.open {
+                transform: translateX(0);
+            }
+
+            .composer-wrap {
+                left: 0;
+            }
+
+            .empty-state {
+                font-size: 30px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="brand">inferlib</div>
+                <button class="new-chat-btn" id="newChatBtn">New chat</button>
+            </div>
+            <div class="sidebar-label">Your chats</div>
+            <div class="chat-list" id="chatList"></div>
+        </aside>
+
+        <main class="main">
+            <header class="topbar">
+                <button class="menu-btn" id="menuBtn" aria-label="Open sidebar">☰</button>
+                <div class="top-title" id="topTitle">New chat</div>
+            </header>
+
+            <div class="chat-scroll" id="chatScroll">
+                <div class="chat-content">
+                    <div class="empty-state" id="emptyState">Where should we begin?</div>
+                    <div id="messageList"></div>
+                </div>
+            </div>
+
+            <div class="composer-wrap">
+                <div class="composer">
+                    <textarea
+                        id="input"
+                        class="input"
+                        rows="1"
+                        placeholder="Ask anything"
+                    ></textarea>
+                    <button id="sendBtn" class="send-btn" disabled>↑</button>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div class="backdrop" id="backdrop"></div>
+
+    <script>
+        const API_URL = window.location.origin;
+        const SIDEBAR_COLLAPSED_KEY = "inferlib_sidebar_collapsed";
+
+        const appEl = document.querySelector(".app");
+        const sidebarEl = document.getElementById("sidebar");
+        const chatListEl = document.getElementById("chatList");
+        const topTitleEl = document.getElementById("topTitle");
+        const messageListEl = document.getElementById("messageList");
+        const emptyStateEl = document.getElementById("emptyState");
+        const chatScrollEl = document.getElementById("chatScroll");
+        const inputEl = document.getElementById("input");
+        const sendBtnEl = document.getElementById("sendBtn");
+        const newChatBtnEl = document.getElementById("newChatBtn");
+        const menuBtnEl = document.getElementById("menuBtn");
+        const backdropEl = document.getElementById("backdrop");
+
+        let chats = [];
+        let draftChats = [];
+        let activeChatId = null;
+        let activeMessages = [];
+        let isGenerating = false;
+        let isSidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+
+        function uniqueId(prefix = "id") {
+            if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+                return `${prefix}-${crypto.randomUUID()}`;
+            }
+            return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+        }
+
+        function getCombinedChats() {
+            const persistedIds = new Set(chats.map((chat) => chat.chat_id));
+            const unsaved = draftChats.filter((chat) => !persistedIds.has(chat.chat_id));
+            const all = [...unsaved, ...chats];
+            return all.sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0));
+        }
+
+        function deriveTitle(content) {
+            const value = String(content || "").trim();
+            if (!value) {
+                return "New chat";
+            }
+            return value.split(/\s+/).slice(0, 4).join(" ");
+        }
+
+        function closeSidebarOnMobile() {
+            if (window.innerWidth <= 900) {
+                sidebarEl.classList.remove("open");
+                backdropEl.classList.remove("show");
+            }
+        }
+
+        function openSidebarOnMobile() {
+            sidebarEl.classList.add("open");
+            backdropEl.classList.add("show");
+        }
+
+        function applySidebarState() {
+            if (window.innerWidth <= 900) {
+                appEl.classList.remove("sidebar-collapsed");
+                return;
+            }
+            sidebarEl.classList.remove("open");
+            backdropEl.classList.remove("show");
+            appEl.classList.toggle("sidebar-collapsed", isSidebarCollapsed);
+        }
+
+        function toggleSidebar() {
+            if (window.innerWidth <= 900) {
+                if (sidebarEl.classList.contains("open")) {
+                    closeSidebarOnMobile();
+                } else {
+                    openSidebarOnMobile();
+                }
+                return;
+            }
+            isSidebarCollapsed = !isSidebarCollapsed;
+            localStorage.setItem(SIDEBAR_COLLAPSED_KEY, isSidebarCollapsed ? "1" : "0");
+            applySidebarState();
+        }
+
+        function setActiveTitle() {
+            const all = getCombinedChats();
+            const chat = all.find((item) => item.chat_id === activeChatId);
+            topTitleEl.textContent = chat?.title || "New chat";
+        }
+
+        function renderChatList() {
+            const all = getCombinedChats();
+            chatListEl.innerHTML = "";
+
+            for (const chat of all) {
+                const row = document.createElement("div");
+                row.className = "chat-row";
+
+                const btn = document.createElement("button");
+                btn.className = `chat-item${chat.chat_id === activeChatId ? " active" : ""}`;
+
+                const title = document.createElement("div");
+                title.className = "chat-item-title";
+                title.textContent = chat.title || "New chat";
+
+                const preview = document.createElement("div");
+                preview.className = "chat-item-preview";
+                preview.textContent = chat.preview || "";
+
+                btn.appendChild(title);
+                btn.appendChild(preview);
+                btn.addEventListener("click", async () => {
+                    await selectChat(chat.chat_id);
+                    closeSidebarOnMobile();
+                });
+
+                const deleteBtn = document.createElement("button");
+                deleteBtn.className = "chat-delete-btn";
+                deleteBtn.title = "Delete chat";
+                deleteBtn.setAttribute("aria-label", "Delete chat");
+                deleteBtn.textContent = "×";
+                deleteBtn.addEventListener("click", async (event) => {
+                    event.stopPropagation();
+                    const ok = window.confirm("Delete this chat permanently?");
+                    if (!ok) {
+                        return;
+                    }
+                    try {
+                        await deleteChat(chat.chat_id);
+                    } catch (error) {
+                        console.error(error);
+                    }
+                });
+
+                row.appendChild(btn);
+                row.appendChild(deleteBtn);
+                chatListEl.appendChild(row);
+            }
+
+            setActiveTitle();
+        }
+
+        function escapeHtml(text) {
+            return String(text)
+                .replaceAll("&", "&amp;")
+                .replaceAll("<", "&lt;")
+                .replaceAll(">", "&gt;")
+                .replaceAll('"', "&quot;")
+                .replaceAll("'", "&#39;");
+        }
+
+        function applyInlineMarkdown(text) {
+            const codeSpans = [];
+            let transformed = text.replace(/`([^`]+)`/g, (_, code) => {
+                const token = `@@INLINE_${codeSpans.length}@@`;
+                codeSpans.push(`<code>${code}</code>`);
+                return token;
+            });
+
+            transformed = transformed.replace(
+                /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>'
+            );
+            transformed = transformed.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+            transformed = transformed.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+            transformed = transformed.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+            return transformed.replace(/@@INLINE_(\d+)@@/g, (_, idx) => {
+                return codeSpans[Number(idx)] || "";
+            });
+        }
+
+        function markdownToHtml(markdown) {
+            const codeBlocks = [];
+            const normalized = String(markdown ?? "").replace(/\r\n/g, "\n");
+            const withPlaceholders = normalized.replace(
+                /```([\w-]+)?\n([\s\S]*?)```/g,
+                (_, lang = "", code) => {
+                    const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
+                    const safeCode = escapeHtml(code.replace(/\n$/, ""));
+                    const safeLang = escapeHtml(lang);
+                    codeBlocks.push(
+                        `<pre><code${safeLang ? ` class="language-${safeLang}"` : ""}>${safeCode}</code></pre>`
+                    );
+                    return `\n${token}\n`;
+                }
+            );
+
+            const escaped = escapeHtml(withPlaceholders);
+            const lines = escaped.split("\n");
+            const htmlParts = [];
+            let paragraphLines = [];
+            let inUl = false;
+            let inOl = false;
+
+            function flushParagraph() {
+                if (!paragraphLines.length) {
+                    return;
+                }
+                htmlParts.push(`<p>${paragraphLines.join("<br>")}</p>`);
+                paragraphLines = [];
+            }
+
+            function closeLists() {
+                if (inUl) {
+                    htmlParts.push("</ul>");
+                    inUl = false;
+                }
+                if (inOl) {
+                    htmlParts.push("</ol>");
+                    inOl = false;
+                }
+            }
+
+            for (const line of lines) {
+                const trimmed = line.trim();
+
+                if (!trimmed) {
+                    flushParagraph();
+                    closeLists();
+                    continue;
+                }
+
+                if (/^@@CODEBLOCK_(\d+)@@$/.test(trimmed)) {
+                    flushParagraph();
+                    closeLists();
+                    htmlParts.push(trimmed);
+                    continue;
+                }
+
+                const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+                if (headingMatch) {
+                    flushParagraph();
+                    closeLists();
+                    const level = headingMatch[1].length;
+                    htmlParts.push(
+                        `<h${level}>${applyInlineMarkdown(headingMatch[2])}</h${level}>`
+                    );
+                    continue;
+                }
+
+                const ulMatch = trimmed.match(/^[-*+]\s+(.+)$/);
+                if (ulMatch) {
+                    flushParagraph();
+                    if (inOl) {
+                        htmlParts.push("</ol>");
+                        inOl = false;
+                    }
+                    if (!inUl) {
+                        htmlParts.push("<ul>");
+                        inUl = true;
+                    }
+                    htmlParts.push(`<li>${applyInlineMarkdown(ulMatch[1])}</li>`);
+                    continue;
+                }
+
+                const olMatch = trimmed.match(/^\d+\.\s+(.+)$/);
+                if (olMatch) {
+                    flushParagraph();
+                    if (inUl) {
+                        htmlParts.push("</ul>");
+                        inUl = false;
+                    }
+                    if (!inOl) {
+                        htmlParts.push("<ol>");
+                        inOl = true;
+                    }
+                    htmlParts.push(`<li>${applyInlineMarkdown(olMatch[1])}</li>`);
+                    continue;
+                }
+
+                const quoteMatch = trimmed.match(/^>\s?(.+)$/);
+                if (quoteMatch) {
+                    flushParagraph();
+                    closeLists();
+                    htmlParts.push(
+                        `<blockquote>${applyInlineMarkdown(quoteMatch[1])}</blockquote>`
+                    );
+                    continue;
+                }
+
+                closeLists();
+                paragraphLines.push(applyInlineMarkdown(trimmed));
+            }
+
+            flushParagraph();
+            closeLists();
+
+            const html = htmlParts.join("");
+            return html.replace(/@@CODEBLOCK_(\d+)@@/g, (_, idx) => {
+                return codeBlocks[Number(idx)] || "";
+            });
+        }
+
+        function createMessageElement(role, content, isError = false, isLoading = false) {
+            const row = document.createElement("div");
+            row.className = `message-row ${role}`;
+
+            const bubble = document.createElement("div");
+            bubble.className = `message ${role}${isError ? " error" : ""}`;
+            if (isLoading) {
+                bubble.innerHTML = '<span class="loading-dot"></span>';
+            } else if (role === "assistant" && !isError) {
+                bubble.innerHTML = markdownToHtml(content);
+            } else {
+                bubble.textContent = content;
+            }
+
+            row.appendChild(bubble);
+            return row;
+        }
+
+        function renderMessages() {
+            messageListEl.innerHTML = "";
+            emptyStateEl.style.display = activeMessages.length ? "none" : "block";
+
+            for (const message of activeMessages) {
+                messageListEl.appendChild(
+                    createMessageElement(
+                        message.role,
+                        message.content,
+                        message.isError,
+                        message.isLoading
+                    )
+                );
+            }
+
+            chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
+            setActiveTitle();
+        }
+
+        function updateChatFromMessage(chatId, content) {
+            const now = Math.floor(Date.now() / 1000);
+            const title = deriveTitle(content);
+
+            let found = false;
+            for (const chat of chats) {
+                if (chat.chat_id === chatId) {
+                    chat.updated_at = now;
+                    chat.preview = content;
+                    if (!chat.title || chat.title === "New chat") {
+                        chat.title = title;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+
+            for (const chat of draftChats) {
+                if (chat.chat_id === chatId) {
+                    chat.updated_at = now;
+                    chat.preview = content;
+                    if (!chat.title || chat.title === "New chat") {
+                        chat.title = title;
+                    }
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                draftChats.unshift({
+                    chat_id: chatId,
+                    title,
+                    preview: content,
+                    updated_at: now,
+                });
+            }
+        }
+
+        async function loadChats() {
+            const res = await fetch(`${API_URL}/v1/chats`);
+            if (!res.ok) {
+                throw new Error(`Failed to load chats: ${res.status}`);
+            }
+            const data = await res.json();
+            chats = Array.isArray(data.chats) ? data.chats : [];
+            const persistedIds = new Set(chats.map((chat) => chat.chat_id));
+            draftChats = draftChats.filter((chat) => !persistedIds.has(chat.chat_id));
+            const allIds = new Set(getCombinedChats().map((chat) => chat.chat_id));
+
+            if (!activeChatId || !allIds.has(activeChatId)) {
+                if (getCombinedChats().length) {
+                    activeChatId = getCombinedChats()[0].chat_id;
+                } else {
+                    activeChatId = createDraftChat();
+                    return;
+                }
+            }
+
+            renderChatList();
+        }
+
+        async function loadMessages(chatId) {
+            const res = await fetch(`${API_URL}/v1/chats/${encodeURIComponent(chatId)}/messages`);
+            if (!res.ok) {
+                if (res.status === 404) {
+                    activeMessages = [];
+                    renderMessages();
+                    return;
+                }
+                throw new Error(`Failed to load messages: ${res.status}`);
+            }
+            const data = await res.json();
+            activeMessages = Array.isArray(data.messages)
+                ? data.messages.map((msg) => ({ role: msg.role, content: msg.content }))
+                : [];
+            renderMessages();
+        }
+
+        async function selectChat(chatId) {
+            activeChatId = chatId;
+            renderChatList();
+            const isDraft = draftChats.some((chat) => chat.chat_id === chatId) && !chats.some((chat) => chat.chat_id === chatId);
+            if (isDraft) {
+                activeMessages = [];
+                renderMessages();
+                return;
+            }
+            await loadMessages(chatId);
+        }
+
+        function createDraftChat() {
+            const chatId = uniqueId("chat");
+            const now = Math.floor(Date.now() / 1000);
+            draftChats.unshift({
+                chat_id: chatId,
+                title: "New chat",
+                preview: "",
+                updated_at: now,
+            });
+            activeChatId = chatId;
+            activeMessages = [];
+            renderChatList();
+            renderMessages();
+            return chatId;
+        }
+
+        async function deleteChat(chatId) {
+            if (isGenerating && chatId === activeChatId) {
+                return;
+            }
+
+            const isPersisted = chats.some((chat) => chat.chat_id === chatId);
+            if (isPersisted) {
+                const res = await fetch(`${API_URL}/v1/chats/${encodeURIComponent(chatId)}`, {
+                    method: "DELETE",
+                });
+                if (!res.ok && res.status !== 404) {
+                    throw new Error(`Failed to delete chat: ${res.status}`);
+                }
+            }
+
+            chats = chats.filter((chat) => chat.chat_id !== chatId);
+            draftChats = draftChats.filter((chat) => chat.chat_id !== chatId);
+
+            if (activeChatId === chatId) {
+                const all = getCombinedChats();
+                if (all.length) {
+                    await selectChat(all[0].chat_id);
+                } else {
+                    createDraftChat();
+                }
+            } else {
+                renderChatList();
+            }
+        }
+
+        function consumeSseEvent(eventText, onChunk) {
+            const lines = eventText.split(/\r?\n/);
+            for (const line of lines) {
+                if (!line.startsWith("data:")) {
+                    continue;
+                }
+
+                const raw = line.slice(5).trim();
+                if (!raw || raw === "[DONE]") {
+                    continue;
+                }
+
+                const payload = JSON.parse(raw);
+                if (typeof payload.message === "string") {
+                    onChunk(payload.message);
+                }
+            }
+        }
+
+        async function streamCompletion(payload, onChunk) {
+            const response = await fetch(`${API_URL}/v1/chat/completions`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify(payload),
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error ${response.status}`);
+            }
+            if (!response.body) {
+                throw new Error("Readable stream not available in response");
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+
+                buffer += decoder.decode(value, { stream: true });
+                const events = buffer.split(/\r?\n\r?\n/);
+                buffer = events.pop() ?? "";
+                for (const eventText of events) {
+                    consumeSseEvent(eventText, onChunk);
+                }
+            }
+
+            buffer += decoder.decode();
+            if (buffer.trim()) {
+                consumeSseEvent(buffer, onChunk);
+            }
+        }
+
+        async function sendMessage() {
+            if (isGenerating) {
+                return;
+            }
+
+            const text = inputEl.value.trim();
+            if (!text) {
+                return;
+            }
+
+            const chatId = activeChatId || createDraftChat();
+
+            inputEl.value = "";
+            inputEl.style.height = "auto";
+            sendBtnEl.disabled = true;
+            inputEl.disabled = true;
+            isGenerating = true;
+
+            activeMessages.push({ role: "user", content: text });
+            updateChatFromMessage(chatId, text);
+            activeMessages.push({ role: "assistant", content: "", isLoading: true });
+            renderChatList();
+            renderMessages();
+
+            const assistantIndex = activeMessages.length - 1;
+            let assistantText = "";
+
+            try {
+                await streamCompletion(
+                    {
+                        chat_id: chatId,
+                        message_id: uniqueId("msg"),
+                        role: "user",
+                        content: text,
+                        stream: true,
+                    },
+                    (chunk) => {
+                        assistantText += chunk;
+                        activeMessages[assistantIndex] = {
+                            role: "assistant",
+                            content: assistantText,
+                        };
+                        renderMessages();
+                    }
+                );
+
+                if (!assistantText) {
+                    activeMessages[assistantIndex] = {
+                        role: "assistant",
+                        content: "",
+                    };
+                }
+
+                await loadChats();
+                renderChatList();
+            } catch (err) {
+                console.error(err);
+                activeMessages[assistantIndex] = {
+                    role: "assistant",
+                    content: "Failed to generate response. Please try again.",
+                    isError: true,
+                };
+            } finally {
+                isGenerating = false;
+                inputEl.disabled = false;
+                sendBtnEl.disabled = !inputEl.value.trim();
+                inputEl.focus();
+                renderMessages();
+            }
+        }
+
+        inputEl.addEventListener("input", () => {
+            inputEl.style.height = "auto";
+            inputEl.style.height = Math.min(inputEl.scrollHeight, 220) + "px";
+            sendBtnEl.disabled = isGenerating || !inputEl.value.trim();
+        });
+
+        inputEl.addEventListener("keydown", (event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                sendMessage();
+            }
+        });
+
+        sendBtnEl.addEventListener("click", sendMessage);
+        newChatBtnEl.addEventListener("click", () => {
+            createDraftChat();
+            closeSidebarOnMobile();
+            inputEl.focus();
+        });
+
+        menuBtnEl.addEventListener("click", toggleSidebar);
+
+        backdropEl.addEventListener("click", closeSidebarOnMobile);
+        window.addEventListener("resize", applySidebarState);
+
+        window.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                closeSidebarOnMobile();
+            }
+        });
+
+        (async function init() {
+            try {
+                await loadChats();
+                if (activeChatId) {
+                    await selectChat(activeChatId);
+                }
+            } catch (err) {
+                console.error(err);
+                activeMessages = [
+                    {
+                        role: "assistant",
+                        content: "Failed to load chats. Please refresh the page.",
+                        isError: true,
+                    },
+                ];
+                renderMessages();
+            }
+            inputEl.focus();
+            applySidebarState();
+        })();
+    </script>
+</body>
+</html>

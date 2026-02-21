@@ -1,9 +1,8 @@
 import asyncio
 import torch
 
-from asyncio import Future
+from asyncio import Queue
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
-from typing import Any
 
 from inferlib.models import Qwen3
 
@@ -32,35 +31,33 @@ class InferlibEngine:
         self.scheduler = Scheduler(page_manager=self.page_manager, batch_size=4)
         self.runner = Runner(llm=self.llm, page_manager=self.page_manager)
 
-        self._sequence_to_future: dict[str, Future] = {}
+        self._sequence_to_queue: dict[str, Queue] = {}
         self._task = None
         self._lock = asyncio.Lock()
 
         self._eot_token = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
 
-    def add_request(self, payload: dict[str, Any]) -> Future:
+    def add_request(self, chat_history: list[dict[str, str]], chat_id: str) -> Queue:
         if self._task is None:
             raise RuntimeError("Engine not started")
 
-        assert "chat_history" in payload
-        assert "id" in payload
         prompt_tokens: list[int] = self.tokenizer.apply_chat_template(
-            conversation=payload["chat_history"],
+            conversation=chat_history,
             tokenize=True,
             add_generation_prompt=True,
             enable_thinking=False,
         )
         sequence = Sequence(
-            s_id=payload["id"],
+            s_id=chat_id,
             prompt_tokens=prompt_tokens,
             completion_tokens=[],
             eos_token_id=self._eot_token,
-            max_tokens=256,
+            max_tokens=4096,
         )
         self.scheduler.add_request(sequence)
-        future = Future()
-        self._sequence_to_future[payload["id"]] = future
-        return future
+        q = Queue()
+        self._sequence_to_queue[chat_id] = q
+        return q
 
     async def start(self):
         async with self._lock:
@@ -93,14 +90,21 @@ class InferlibEngine:
                 )  # updates sequence inplace
                 self.scheduler.update(batch)
 
-                finished_sequences = self.scheduler.get_finished_sequences()
-                if finished_sequences:
-                    for sequence in finished_sequences:
-                        response = self.tokenizer.decode(
-                            sequence.completion_tokens, skip_special_tokens=True
+                for sequence in batch:
+                    if sequence.is_finished:
+                        await self._sequence_to_queue[sequence.s_id].put(
+                            self.tokenizer.decode(
+                                [sequence.last_token_id], skip_special_tokens=True
+                            )
                         )
-                        self._sequence_to_future[sequence.s_id].set_result(response)
-                        del self._sequence_to_future[sequence.s_id]
+                        await self._sequence_to_queue[sequence.s_id].put(None)
+                        del self._sequence_to_queue[sequence.s_id]
+                    else:
+                        await self._sequence_to_queue[sequence.s_id].put(
+                            self.tokenizer.decode(
+                                [sequence.last_token_id], skip_special_tokens=True
+                            )
+                        )
 
             except Exception as e:
                 logger.error(e)
