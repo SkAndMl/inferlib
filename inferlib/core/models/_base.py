@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
-from inferlib.engine.sequence import Sequence
-from inferlib.engine.page import PageManager
+from inferlib.core.engine.sequence import Sequence
+from inferlib.core.engine.page import PageManager
 
 
 class Model(ABC):
