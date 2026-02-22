@@ -1,0 +1,46 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.responses import FileResponse
+
+from inferlib.server.apis.chat import router as chat_router
+from inferlib.server.apis.ui_chats import router as ui_chats_router
+from inferlib.server.db_client import get_db_client
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db_client = await get_db_client()
+    await db_client.initialize()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.include_router(router=chat_router)
+app.include_router(router=ui_chats_router)
+
+
+@app.get("/")
+async def root():
+    return FileResponse("inferlib/server/index.html")
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "200"}
+
+
+@app.get("/v1/models")
+async def get_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "Qwen/Qwen3-0.6B",
+                "object": "model",
+                "owned_by": "inferlib",
+            }
+        ],
+    }

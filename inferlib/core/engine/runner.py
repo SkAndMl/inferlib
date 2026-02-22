@@ -1,7 +1,7 @@
-from inferlib.models import Model
-from inferlib.engine.sequence import Sequence
-from inferlib.engine.page import PageManager
-from inferlib.log import logger
+from inferlib.core.models import Model
+from inferlib.core.engine.sequence import Sequence
+from inferlib.core.engine.page import PageManager
+from inferlib.core.log import logger
 
 
 class Runner:

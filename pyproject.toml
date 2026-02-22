@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.128.0",
     "loguru>=0.7.3",
     "torch>=2.9.1",
+    "transformers>=5.2.0",
     "uvicorn>=0.40.0",
 ]
 
@@ -17,3 +18,6 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.14.10",
 ]
+
+[project.scripts]
+inferlib = "inferlib.server.cli:main"
