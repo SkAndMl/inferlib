@@ -209,6 +209,41 @@
             text-overflow: ellipsis;
         }
 
+        .topbar-actions {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .thinking-toggle {
+            border: 1px solid var(--line);
+            border-radius: 999px;
+            background: #fff;
+            color: #111827;
+            padding: 6px 10px;
+            font-size: 12px;
+            line-height: 1;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+        }
+
+        .thinking-toggle:hover:not(:disabled) {
+            border-color: #9ca3af;
+        }
+
+        .thinking-toggle.active {
+            background: #111827;
+            color: #fff;
+            border-color: #111827;
+        }
+
+        .thinking-toggle:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
         .chat-scroll {
             flex: 1;
             overflow-y: auto;
@@ -331,6 +366,67 @@
             text-decoration: underline;
         }
 
+        .thinking-block {
+            margin: 0 0 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 10px;
+            background: #f9fafb;
+            overflow: hidden;
+        }
+
+        .thinking-block:last-child {
+            margin-bottom: 0;
+        }
+
+        .thinking-block > summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 8px 12px;
+            color: #374151;
+            font-size: 13px;
+            font-weight: 600;
+            user-select: none;
+            border-bottom: 1px solid transparent;
+        }
+
+        .thinking-block > summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .thinking-block > summary::before {
+            content: "▸";
+            margin-right: 8px;
+            transition: transform 0.15s ease;
+            display: inline-block;
+        }
+
+        .thinking-block[open] > summary {
+            border-bottom-color: #e5e7eb;
+        }
+
+        .thinking-block[open] > summary::before {
+            transform: rotate(90deg);
+        }
+
+        .thinking-block-open {
+            border-color: #cbd5e1;
+            background: #f3f4f6;
+        }
+
+        .thinking-content {
+            padding: 10px 12px;
+            color: #4b5563;
+            font-size: 14px;
+        }
+
+        .thinking-content p:last-child,
+        .thinking-content ul:last-child,
+        .thinking-content ol:last-child,
+        .thinking-content pre:last-child,
+        .thinking-content blockquote:last-child {
+            margin-bottom: 0;
+        }
+
         .composer-wrap {
             position: fixed;
             left: 280px;
@@ -449,6 +545,8 @@
             }
         }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
 </head>
 <body>
     <div class="app">
@@ -465,6 +563,16 @@
             <header class="topbar">
                 <button class="menu-btn" id="menuBtn" aria-label="Open sidebar">☰</button>
                 <div class="top-title" id="topTitle">New chat</div>
+                <div class="topbar-actions">
+                    <button
+                        type="button"
+                        id="thinkingToggleBtn"
+                        class="thinking-toggle"
+                        aria-pressed="false"
+                    >
+                        Thinking: Off
+                    </button>
+                </div>
             </header>
 
             <div class="chat-scroll" id="chatScroll">
@@ -507,12 +615,15 @@
         const newChatBtnEl = document.getElementById("newChatBtn");
         const menuBtnEl = document.getElementById("menuBtn");
         const backdropEl = document.getElementById("backdrop");
+        const thinkingToggleBtnEl = document.getElementById("thinkingToggleBtn");
 
         let chats = [];
         let draftChats = [];
         let activeChatId = null;
         let activeMessages = [];
         let isGenerating = false;
+        let thinkingEnabled = false;
+        const thinkingPanelState = new Map();
         let isSidebarCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
 
         function uniqueId(prefix = "id") {
@@ -571,6 +682,20 @@
             isSidebarCollapsed = !isSidebarCollapsed;
             localStorage.setItem(SIDEBAR_COLLAPSED_KEY, isSidebarCollapsed ? "1" : "0");
             applySidebarState();
+        }
+
+        function renderThinkingToggle() {
+            thinkingToggleBtnEl.classList.toggle("active", thinkingEnabled);
+            thinkingToggleBtnEl.disabled = isGenerating;
+            thinkingToggleBtnEl.setAttribute("aria-pressed", thinkingEnabled ? "true" : "false");
+            thinkingToggleBtnEl.textContent = `Thinking: ${thinkingEnabled ? "On" : "Off"}`;
+        }
+
+        function getMessageKey(message, index) {
+            if (message && typeof message.message_id === "string" && message.message_id) {
+                return message.message_id;
+            }
+            return `${activeChatId || "chat"}:${index}`;
         }
 
         function setActiveTitle() {
@@ -662,8 +787,20 @@
         }
 
         function markdownToHtml(markdown) {
+            const source = String(markdown ?? "");
+            if (window.marked && typeof window.marked.parse === "function") {
+                const rawHtml = window.marked.parse(source, {
+                    gfm: true,
+                    breaks: true,
+                });
+                if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
+                    return window.DOMPurify.sanitize(rawHtml);
+                }
+                return rawHtml;
+            }
+
             const codeBlocks = [];
-            const normalized = String(markdown ?? "").replace(/\r\n/g, "\n");
+            const normalized = source.replace(/\r\n/g, "\n");
             const withPlaceholders = normalized.replace(
                 /```([\w-]+)?\n([\s\S]*?)```/g,
                 (_, lang = "", code) => {
@@ -783,7 +920,93 @@
             });
         }
 
-        function createMessageElement(role, content, isError = false, isLoading = false) {
+        function splitThinkingSegments(content) {
+            const source = String(content ?? "");
+            const segments = [];
+            let cursor = 0;
+            const openTag = "<think>";
+            const closeTag = "</think>";
+
+            while (cursor < source.length) {
+                const start = source.indexOf(openTag, cursor);
+                if (start === -1) {
+                    segments.push({
+                        type: "text",
+                        content: source.slice(cursor),
+                    });
+                    break;
+                }
+
+                if (start > cursor) {
+                    segments.push({
+                        type: "text",
+                        content: source.slice(cursor, start),
+                    });
+                }
+
+                const thinkingStart = start + openTag.length;
+                const end = source.indexOf(closeTag, thinkingStart);
+
+                if (end === -1) {
+                    segments.push({
+                        type: "thinking",
+                        content: source.slice(thinkingStart),
+                        inProgress: true,
+                    });
+                    cursor = source.length;
+                    break;
+                }
+
+                segments.push({
+                    type: "thinking",
+                    content: source.slice(thinkingStart, end),
+                    inProgress: false,
+                });
+                cursor = end + closeTag.length;
+            }
+
+            if (!segments.length) {
+                return [{ type: "text", content: source }];
+            }
+            return segments;
+        }
+
+        function renderAssistantContent(content, messageKey) {
+            const segments = splitThinkingSegments(content);
+            const hasThinking = segments.some((segment) => segment.type === "thinking");
+            if (!hasThinking) {
+                return markdownToHtml(content);
+            }
+
+            const savedState = thinkingPanelState.get(messageKey);
+            let thinkingIndex = 0;
+
+            return segments
+                .map((segment) => {
+                    if (segment.type === "text") {
+                        return segment.content ? markdownToHtml(segment.content) : "";
+                    }
+
+                    const blockContent = markdownToHtml(segment.content);
+                    const summary = segment.inProgress ? "Thinking (in progress)" : "Thinking";
+                    const blockClass = segment.inProgress
+                        ? "thinking-block thinking-block-open"
+                        : "thinking-block";
+                    const blockState = savedState?.get(thinkingIndex);
+                    const shouldOpen = typeof blockState === "boolean" ? blockState : segment.inProgress;
+                    const openAttr = shouldOpen ? " open" : "";
+                    thinkingIndex += 1;
+                    return (
+                        `<details class="${blockClass}"${openAttr}>` +
+                        `<summary>${summary}</summary>` +
+                        `<div class="thinking-content">${blockContent}</div>` +
+                        "</details>"
+                    );
+                })
+                .join("");
+        }
+
+        function createMessageElement(role, content, isError = false, isLoading = false, messageKey = "") {
             const row = document.createElement("div");
             row.className = `message-row ${role}`;
 
@@ -792,7 +1015,15 @@
             if (isLoading) {
                 bubble.innerHTML = '<span class="loading-dot"></span>';
             } else if (role === "assistant" && !isError) {
-                bubble.innerHTML = markdownToHtml(content);
+                bubble.innerHTML = renderAssistantContent(content, messageKey);
+                const thinkingBlocks = bubble.querySelectorAll("details.thinking-block");
+                thinkingBlocks.forEach((blockEl, idx) => {
+                    blockEl.addEventListener("toggle", () => {
+                        const state = thinkingPanelState.get(messageKey) || new Map();
+                        state.set(idx, blockEl.open);
+                        thinkingPanelState.set(messageKey, state);
+                    });
+                });
             } else {
                 bubble.textContent = content;
             }
@@ -805,16 +1036,18 @@
             messageListEl.innerHTML = "";
             emptyStateEl.style.display = activeMessages.length ? "none" : "block";
 
-            for (const message of activeMessages) {
+            activeMessages.forEach((message, index) => {
+                const messageKey = getMessageKey(message, index);
                 messageListEl.appendChild(
                     createMessageElement(
                         message.role,
                         message.content,
                         message.isError,
-                        message.isLoading
+                        message.isLoading,
+                        messageKey
                     )
                 );
-            }
+            });
 
             chatScrollEl.scrollTop = chatScrollEl.scrollHeight;
             setActiveTitle();
@@ -927,7 +1160,11 @@
             }
             const data = await res.json();
             activeMessages = Array.isArray(data.messages)
-                ? data.messages.map((msg) => ({ role: msg.role, content: msg.content }))
+                ? data.messages.map((msg) => ({
+                    role: msg.role,
+                    content: msg.content,
+                    message_id: msg.message_id,
+                }))
                 : [];
             renderMessages();
         }
@@ -1069,10 +1306,19 @@
             sendBtnEl.disabled = true;
             inputEl.disabled = true;
             isGenerating = true;
+            renderThinkingToggle();
 
-            activeMessages.push({ role: "user", content: text });
+            const userMessageId = uniqueId("msg");
+            const assistantMessageId = uniqueId("msg");
+
+            activeMessages.push({ role: "user", content: text, message_id: userMessageId });
             updateChatFromMessage(chatId, text);
-            activeMessages.push({ role: "assistant", content: "", isLoading: true });
+            activeMessages.push({
+                role: "assistant",
+                content: "",
+                isLoading: true,
+                message_id: assistantMessageId,
+            });
             renderChatList();
             renderMessages();
 
@@ -1080,30 +1326,29 @@
             let assistantText = "";
 
             try {
-                await saveMessage(chatId, "user", text);
+                await saveMessage(chatId, "user", text, userMessageId);
                 await streamCompletion(
                     {
                         model: MODEL_ID,
                         messages: toOpenAIMessages(activeMessages),
                         stream: true,
+                        thinking: thinkingEnabled,
                     },
                     (chunk) => {
                         assistantText += chunk;
-                        activeMessages[assistantIndex] = {
-                            role: "assistant",
-                            content: assistantText,
-                        };
+                        activeMessages[assistantIndex].role = "assistant";
+                        activeMessages[assistantIndex].content = assistantText;
+                        activeMessages[assistantIndex].isLoading = false;
                         renderMessages();
                     }
                 );
 
                 if (!assistantText) {
-                    activeMessages[assistantIndex] = {
-                        role: "assistant",
-                        content: "",
-                    };
+                    activeMessages[assistantIndex].role = "assistant";
+                    activeMessages[assistantIndex].content = "";
+                    activeMessages[assistantIndex].isLoading = false;
                 } else {
-                    await saveMessage(chatId, "assistant", assistantText);
+                    await saveMessage(chatId, "assistant", assistantText, assistantMessageId);
                 }
 
                 await loadChats();
@@ -1114,11 +1359,13 @@
                     role: "assistant",
                     content: "Failed to generate response. Please try again.",
                     isError: true,
+                    message_id: assistantMessageId,
                 };
             } finally {
                 isGenerating = false;
                 inputEl.disabled = false;
                 sendBtnEl.disabled = !inputEl.value.trim();
+                renderThinkingToggle();
                 inputEl.focus();
                 renderMessages();
             }
@@ -1138,6 +1385,13 @@
         });
 
         sendBtnEl.addEventListener("click", sendMessage);
+        thinkingToggleBtnEl.addEventListener("click", () => {
+            if (isGenerating) {
+                return;
+            }
+            thinkingEnabled = !thinkingEnabled;
+            renderThinkingToggle();
+        });
         newChatBtnEl.addEventListener("click", () => {
             createDraftChat();
             closeSidebarOnMobile();
@@ -1173,6 +1427,7 @@
                 renderMessages();
             }
             inputEl.focus();
+            renderThinkingToggle();
             applySidebarState();
         })();
     </script>

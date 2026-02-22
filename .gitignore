@@ -11,4 +11,5 @@ wheels/
 
 .DS_STORE
 
+.env
 test.ipynb
