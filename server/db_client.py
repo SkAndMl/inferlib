@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from server.log import logger
-from server.models import Payload
 
 CREATE_CHAT_TABLE_QUERY = """
 CREATE TABLE IF NOT EXISTS chats (
@@ -67,12 +66,7 @@ class DBClient:
                 """
             )
 
-    async def add_message(self, payload: Payload):
-        chat_id: str = payload.chat_id
-        message_id: str = payload.message_id
-        role: str = payload.role
-        content: str = payload.content
-
+    async def add_message(self, chat_id: str, message_id: str, role: str, content: str):
         title = " ".join(content.split()[:4])
         now = int(time.time())
 

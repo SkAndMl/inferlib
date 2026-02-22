@@ -433,10 +433,16 @@ class Qwen3(nn.Module, Model):
             mask=mask,
         )  # bsz, max_len, embed_dim
 
+        temperatures = torch.tensor(
+            [(seq.temperature) for seq in sequences], device=device
+        )
+
         row_idx = torch.arange(B, device=device)
         last_idx = seq_lens - 1
-        next_tokens = logits[row_idx, last_idx, :].argmax(dim=-1)
-        return next_tokens.tolist()
+        last_token_logits = logits[row_idx, last_idx, :]  # bsz, vocab
+        next_token_probs = F.softmax(last_token_logits / temperatures[:, None], dim=-1)
+        sampled_idx = torch.multinomial(next_token_probs, num_samples=1)  # bsz, 1
+        return sampled_idx.squeeze(1).tolist()
 
     @torch.inference_mode()
     def decode(

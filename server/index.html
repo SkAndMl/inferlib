@@ -492,6 +492,7 @@
 
     <script>
         const API_URL = window.location.origin;
+        const MODEL_ID = "Qwen/Qwen3-0.6B";
         const SIDEBAR_COLLAPSED_KEY = "inferlib_sidebar_collapsed";
 
         const appEl = document.querySelector(".app");
@@ -858,6 +859,39 @@
             }
         }
 
+        function toOpenAIMessages(messages) {
+            return messages
+                .filter(
+                    (message) =>
+                        !message.isLoading &&
+                        !message.isError &&
+                        typeof message.content === "string" &&
+                        ["system", "user", "assistant"].includes(message.role)
+                )
+                .map((message) => ({
+                    role: message.role,
+                    content: message.content,
+                }));
+        }
+
+        async function saveMessage(chatId, role, content, messageId = uniqueId("msg")) {
+            const res = await fetch(`${API_URL}/v1/chats/${encodeURIComponent(chatId)}/messages`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                },
+                body: JSON.stringify({
+                    role,
+                    content,
+                    message_id: messageId,
+                }),
+            });
+
+            if (!res.ok) {
+                throw new Error(`Failed to save message: ${res.status}`);
+            }
+        }
+
         async function loadChats() {
             const res = await fetch(`${API_URL}/v1/chats`);
             if (!res.ok) {
@@ -969,8 +1003,10 @@
                 }
 
                 const payload = JSON.parse(raw);
-                if (typeof payload.message === "string") {
-                    onChunk(payload.message);
+                const choice = payload.choices?.[0];
+                const chunk = choice?.delta?.content;
+                if (typeof chunk === "string" && chunk.length > 0) {
+                    onChunk(chunk);
                 }
             }
         }
@@ -985,7 +1021,8 @@
             });
 
             if (!response.ok) {
-                throw new Error(`HTTP error ${response.status}`);
+                const errorText = await response.text();
+                throw new Error(`HTTP error ${response.status}: ${errorText}`);
             }
             if (!response.body) {
                 throw new Error("Readable stream not available in response");
@@ -1043,12 +1080,11 @@
             let assistantText = "";
 
             try {
+                await saveMessage(chatId, "user", text);
                 await streamCompletion(
                     {
-                        chat_id: chatId,
-                        message_id: uniqueId("msg"),
-                        role: "user",
-                        content: text,
+                        model: MODEL_ID,
+                        messages: toOpenAIMessages(activeMessages),
                         stream: true,
                     },
                     (chunk) => {
@@ -1066,6 +1102,8 @@
                         role: "assistant",
                         content: "",
                     };
+                } else {
+                    await saveMessage(chatId, "assistant", assistantText);
                 }
 
                 await loadChats();

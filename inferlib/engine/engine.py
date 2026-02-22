@@ -37,7 +37,13 @@ class InferlibEngine:
 
         self._eot_token = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
 
-    def add_request(self, chat_history: list[dict[str, str]], chat_id: str) -> Queue:
+    def add_request(
+        self,
+        chat_history: list[dict[str, str]],
+        chat_id: str,
+        max_tokens: int = 4096,
+        temperature: float = 0.1,
+    ) -> Queue:
         if self._task is None:
             raise RuntimeError("Engine not started")
 
@@ -52,7 +58,8 @@ class InferlibEngine:
             prompt_tokens=prompt_tokens,
             completion_tokens=[],
             eos_token_id=self._eot_token,
-            max_tokens=4096,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
         self.scheduler.add_request(sequence)
         q = Queue()
@@ -91,20 +98,25 @@ class InferlibEngine:
                 self.scheduler.update(batch)
 
                 for sequence in batch:
+                    new_text = self.tokenizer.decode(
+                        sequence.completion_tokens, skip_special_tokens=True
+                    )
                     if sequence.is_finished:
                         await self._sequence_to_queue[sequence.s_id].put(
-                            self.tokenizer.decode(
-                                [sequence.last_token_id], skip_special_tokens=True
+                            (
+                                new_text[len(sequence.last_text) :],
+                                sequence.finish_reason,
                             )
                         )
-                        await self._sequence_to_queue[sequence.s_id].put(None)
                         del self._sequence_to_queue[sequence.s_id]
                     else:
                         await self._sequence_to_queue[sequence.s_id].put(
-                            self.tokenizer.decode(
-                                [sequence.last_token_id], skip_special_tokens=True
+                            (
+                                new_text[len(sequence.last_text) :],
+                                sequence.finish_reason,
                             )
                         )
+                        sequence.last_text = new_text
 
             except Exception as e:
                 logger.error(e)
