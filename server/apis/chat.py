@@ -19,6 +19,7 @@ from server.models import (
     Delta,
     Message,
     StreamingChoice,
+    UsageStats,
 )
 
 _engine: InferlibEngine | None = None
@@ -89,7 +90,12 @@ async def chat(payload: ChatCompletionRequest):
     logger.info(f"{payload=}")
     chat_id = f"chatcmpl-{str(uuid4())}"
     chat_history = [m.model_dump() for m in payload.messages]
-    q = _engine.add_request(chat_history=chat_history, chat_id=chat_id)
+    q = _engine.add_request(
+        chat_history=chat_history,
+        chat_id=chat_id,
+        max_tokens=payload.max_tokens,
+        temperature=payload.temperature,
+    )
 
     if payload.stream:
         return StreamingResponse(
@@ -106,6 +112,15 @@ async def chat(payload: ChatCompletionRequest):
     content = "".join(
         [choice.delta.content for choice in streaming_choices if choice.delta.content]
     )
+    prompt_tokens = len(
+        _engine.tokenizer.apply_chat_template(
+            conversation=chat_history,
+            tokenize=True,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+    )
+    completion_tokens = len(_engine.tokenizer.encode(content, add_special_tokens=False))
 
     chat_completion_response = ChatCompletionResponse(
         id=chat_id,
@@ -118,5 +133,10 @@ async def chat(payload: ChatCompletionRequest):
                 finish_reason=finish_reason,
             )
         ],
+        usage=UsageStats(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        ),
     )
     return chat_completion_response

@@ -30,3 +30,17 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "200"}
+
+
+@app.get("/v1/models")
+async def get_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "Qwen/Qwen3-0.6B",
+                "object": "model",
+                "owned_by": "inferlib",
+            }
+        ],
+    }

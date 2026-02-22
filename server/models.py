@@ -33,7 +33,7 @@ class ChatCompletionResponse(BaseModel):
     created: int
     model: str
     choices: list[Choice]
-    # usage: UsageStats
+    usage: UsageStats
 
 
 class Delta(BaseModel):
