@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
-from server.log import logger
+from inferlib.server.log import logger
 
 CREATE_CHAT_TABLE_QUERY = """
 CREATE TABLE IF NOT EXISTS chats (
@@ -188,7 +188,7 @@ _db_lock = asyncio.Lock()
 
 
 async def get_db_client() -> DBClient:
-    from server.config import DB_PATH
+    from inferlib.server.config import DB_PATH
 
     global _db_client
     if _db_client is not None:

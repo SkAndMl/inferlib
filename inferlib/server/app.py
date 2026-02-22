@@ -4,9 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
-from server.apis.chat import router as chat_router
-from server.apis.ui_chats import router as ui_chats_router
-from server.db_client import get_db_client
+from inferlib.server.apis.chat import router as chat_router
+from inferlib.server.apis.ui_chats import router as ui_chats_router
+from inferlib.server.db_client import get_db_client
 
 
 @asynccontextmanager
@@ -24,7 +24,7 @@ app.include_router(router=ui_chats_router)
 
 @app.get("/")
 async def root():
-    return FileResponse("server/index.html")
+    return FileResponse("inferlib/server/index.html")
 
 
 @app.get("/health")

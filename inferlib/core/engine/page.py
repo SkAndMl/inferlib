@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from torch import Tensor
 
-from inferlib.engine.sequence import Sequence
+from inferlib.core.engine.sequence import Sequence
 
 
 @dataclass

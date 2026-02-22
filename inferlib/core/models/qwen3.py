@@ -5,9 +5,9 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from transformers import AutoModelForCausalLM
 
-from inferlib.engine.page import PageManager
-from inferlib.engine.sequence import Sequence
-from inferlib.models._base import Model
+from inferlib.core.engine.page import PageManager
+from inferlib.core.engine.sequence import Sequence
+from inferlib.core.models._base import Model
 
 
 @dataclass

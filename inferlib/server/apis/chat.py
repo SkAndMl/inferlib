@@ -9,9 +9,9 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from typing import AsyncIterator
 
-from inferlib import InferlibEngine
-from server.log import logger
-from server.models import (
+from inferlib.core import InferlibEngine
+from inferlib.server.log import logger
+from inferlib.server.models import (
     ChatCompletionChunk,
     ChatCompletionRequest,
     ChatCompletionResponse,

@@ -6,7 +6,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from server.db_client import get_db_client
+from inferlib.server.db_client import get_db_client
 
 router = APIRouter()
 

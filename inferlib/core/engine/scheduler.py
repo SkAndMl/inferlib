@@ -3,9 +3,9 @@ import math
 from collections import defaultdict, deque
 from typing import Literal
 
-from inferlib.engine.page import PageManager
-from inferlib.engine.sequence import Sequence, SequenceState
-from inferlib.log import logger
+from inferlib.core.engine.page import PageManager
+from inferlib.core.engine.sequence import Sequence, SequenceState
+from inferlib.core.log import logger
 
 
 class _Bucket:

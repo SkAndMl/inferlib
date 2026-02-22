@@ -4,13 +4,13 @@ import torch
 from asyncio import Queue
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from inferlib.models import Qwen3
+from inferlib.core.models import Qwen3
 
-from inferlib.engine.runner import Runner
-from inferlib.engine.scheduler import Scheduler
-from inferlib.engine.sequence import Sequence
-from inferlib.engine.page import PageManager
-from inferlib.log import logger
+from inferlib.core.engine.runner import Runner
+from inferlib.core.engine.scheduler import Scheduler
+from inferlib.core.engine.sequence import Sequence
+from inferlib.core.engine.page import PageManager
+from inferlib.core.log import logger
 
 
 class InferlibEngine:
@@ -37,6 +37,43 @@ class InferlibEngine:
 
         self._eot_token = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
 
+    @staticmethod
+    def _normalize_token_ids(tokens: object) -> list[int]:
+        # Handle common tokenizer return types:
+        # - list[int]
+        # - tokenizers.Encoding (has `.ids`)
+        # - list[tokenizers.Encoding]
+        # - BatchEncoding-like objects (has `.input_ids`)
+        if isinstance(tokens, list):
+            if not tokens:
+                return []
+
+            if all(isinstance(token, int) for token in tokens):
+                return [int(token) for token in tokens]
+
+            if all(hasattr(token, "ids") for token in tokens):
+                return [int(token_id) for token in tokens for token_id in token.ids]
+
+            if all(isinstance(token, list) for token in tokens):
+                return [int(token_id) for token_list in tokens for token_id in token_list]
+
+        if hasattr(tokens, "ids"):
+            return [int(token_id) for token_id in tokens.ids]
+
+        if hasattr(tokens, "input_ids"):
+            input_ids = tokens.input_ids
+            if isinstance(input_ids, list):
+                if not input_ids:
+                    return []
+                if all(isinstance(token, int) for token in input_ids):
+                    return [int(token) for token in input_ids]
+                if all(isinstance(token, list) for token in input_ids):
+                    return [
+                        int(token_id) for token_list in input_ids for token_id in token_list
+                    ]
+
+        raise TypeError(f"Unsupported tokenizer output type: {type(tokens)!r}")
+
     def add_request(
         self,
         chat_history: list[dict[str, str]],
@@ -47,12 +84,13 @@ class InferlibEngine:
         if self._task is None:
             raise RuntimeError("Engine not started")
 
-        prompt_tokens: list[int] = self.tokenizer.apply_chat_template(
+        raw_prompt_tokens = self.tokenizer.apply_chat_template(
             conversation=chat_history,
             tokenize=True,
             add_generation_prompt=True,
             enable_thinking=False,
         )
+        prompt_tokens = self._normalize_token_ids(raw_prompt_tokens)
         sequence = Sequence(
             s_id=chat_id,
             prompt_tokens=prompt_tokens,
