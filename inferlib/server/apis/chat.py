@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from uuid import uuid4
 
@@ -28,7 +29,8 @@ _engine: InferlibEngine | None = None
 @asynccontextmanager
 async def lifespan(app: APIRouter):
     global _engine
-    _engine = InferlibEngine()
+    model_class = os.environ.get("INFERLIB_MODEL_CLASS", "Qwen/Qwen3-0.6B")
+    _engine = InferlibEngine(model_class=model_class)
     await _engine.start()
     yield
     await _engine.stop()
@@ -52,7 +54,6 @@ async def _content_generator(
         return delta
 
     while True:
-        # TODO: update q to return finish reason
         content, finish_reason = await q.get()
         delta = _delta_generator(content)
         yield ChatCompletionChunk(
@@ -95,6 +96,7 @@ async def chat(payload: ChatCompletionRequest):
         chat_id=chat_id,
         max_tokens=payload.max_tokens,
         temperature=payload.temperature,
+        enable_thinking=payload.thinking,
     )
 
     if payload.stream:
@@ -117,7 +119,7 @@ async def chat(payload: ChatCompletionRequest):
             conversation=chat_history,
             tokenize=True,
             add_generation_prompt=True,
-            enable_thinking=False,
+            enable_thinking=payload.thinking,
         )
     )
     completion_tokens = len(_engine.tokenizer.encode(content, add_special_tokens=False))

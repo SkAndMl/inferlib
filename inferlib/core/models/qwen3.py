@@ -3,7 +3,7 @@ import torch
 from dataclasses import dataclass
 from torch import Tensor, nn
 from torch.nn import functional as F
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
 from inferlib.core.engine.page import PageManager
 from inferlib.core.engine.sequence import Sequence
@@ -382,13 +382,14 @@ class Qwen3(nn.Module, Model):
     def from_pretrained(
         cls, model_class="Qwen/Qwen3-0.6B"
     ) -> tuple["Qwen3", Qwen3Config]:
+        hf_cfg = AutoConfig.from_pretrained(model_class).to_dict()
+        cfg = Qwen3Config.from_dict(hf_cfg)
         hf_sd = AutoModelForCausalLM.from_pretrained(model_class).state_dict()
         keys = sorted(hf_sd.keys())
         for k in keys:
             if k.startswith("model."):
                 hf_sd[k[len("model.") :]] = hf_sd.pop(k)
 
-        cfg = Qwen3Config()
         model = Qwen3(cfg)
         model.load_state_dict(hf_sd)
         return model, cfg

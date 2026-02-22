@@ -4,7 +4,7 @@ import torch
 from asyncio import Queue
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from inferlib.core.models import Qwen3
+from inferlib.core.models import Qwen3, SUPPORTED_MODEL_LIST
 
 from inferlib.core.engine.runner import Runner
 from inferlib.core.engine.scheduler import Scheduler
@@ -14,13 +14,14 @@ from inferlib.core.log import logger
 
 
 class InferlibEngine:
-    def __init__(self):
-        self.llm, self.model_config = Qwen3.from_pretrained("Qwen/Qwen3-0.6B")
+    def __init__(self, model_class: str):
+        assert model_class in SUPPORTED_MODEL_LIST
+        self.llm, self.model_config = Qwen3.from_pretrained(model_class)
         self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
-            "Qwen/Qwen3-0.6B"
+            model_class
         )
         self.page_manager = PageManager(
-            num_pages=128,
+            num_pages=256,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
             page_size=16,
@@ -55,7 +56,9 @@ class InferlibEngine:
                 return [int(token_id) for token in tokens for token_id in token.ids]
 
             if all(isinstance(token, list) for token in tokens):
-                return [int(token_id) for token_list in tokens for token_id in token_list]
+                return [
+                    int(token_id) for token_list in tokens for token_id in token_list
+                ]
 
         if hasattr(tokens, "ids"):
             return [int(token_id) for token_id in tokens.ids]
@@ -69,7 +72,9 @@ class InferlibEngine:
                     return [int(token) for token in input_ids]
                 if all(isinstance(token, list) for token in input_ids):
                     return [
-                        int(token_id) for token_list in input_ids for token_id in token_list
+                        int(token_id)
+                        for token_list in input_ids
+                        for token_id in token_list
                     ]
 
         raise TypeError(f"Unsupported tokenizer output type: {type(tokens)!r}")
@@ -80,6 +85,7 @@ class InferlibEngine:
         chat_id: str,
         max_tokens: int = 4096,
         temperature: float = 0.1,
+        enable_thinking: bool = False,
     ) -> Queue:
         if self._task is None:
             raise RuntimeError("Engine not started")
@@ -88,7 +94,7 @@ class InferlibEngine:
             conversation=chat_history,
             tokenize=True,
             add_generation_prompt=True,
-            enable_thinking=False,
+            enable_thinking=enable_thinking,
         )
         prompt_tokens = self._normalize_token_ids(raw_prompt_tokens)
         sequence = Sequence(

@@ -13,6 +13,7 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = True
     temperature: float = 1.0
     max_tokens: int = 4096
+    thinking: bool = False
 
 
 class Choice(BaseModel):
