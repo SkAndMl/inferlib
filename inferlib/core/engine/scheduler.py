@@ -1,6 +1,6 @@
 import asyncio
 import math
-from collections import defaultdict, deque
+from collections import deque
 from typing import Literal
 
 from inferlib.core.engine.page import PageManager
@@ -11,7 +11,8 @@ from inferlib.core.log import logger
 class _Bucket:
     def __init__(self, page_size: int):
         self.page_size = page_size
-        self._buckets: dict[int, deque[Sequence]] = defaultdict(deque)
+        self._buckets: dict[int, deque[Sequence]] = {}
+        self._skip_counts: dict[int, int] = {}
         self._total_sequences: int = 0
 
     def add(
@@ -26,6 +27,10 @@ class _Bucket:
                 sequence.sequence_length + self.page_size - 1
             ) // self.page_size
 
+            if bucket_idx not in self._buckets:
+                self._buckets[bucket_idx] = deque()
+                self._skip_counts[bucket_idx] = 0
+
             match append:
                 case "right":
                     self._buckets[bucket_idx].append(sequence)
@@ -37,9 +42,17 @@ class _Bucket:
         if len(self) == 0:
             return None
 
-        if len(self._buckets[bucket_idx]) > 0:
+        bucket = self._buckets.get(bucket_idx)
+        if bucket is None:
+            return None
+
+        if len(bucket) > 0:
             self._total_sequences -= 1
-            return self._buckets[bucket_idx].popleft()
+            sequence = bucket.popleft()
+            if len(bucket) == 0:
+                del self._skip_counts[bucket_idx]
+                del self._buckets[bucket_idx]
+            return sequence
 
         return None
 
@@ -53,26 +66,54 @@ class _Bucket:
     def max_freq_bucket(self) -> int | None:
         if len(self) == 0:
             return None
-        return max(self._buckets, key=lambda k: len(self._buckets[k]))
+
+        _max_bucket = max(
+            self._buckets, key=lambda k: len(self._buckets[k]) + self._skip_counts[k]
+        )
+        self._skip_counts[_max_bucket] = 0
+        for k in self._skip_counts:
+            if k == _max_bucket:
+                continue
+            self._skip_counts[k] += 1
+
+        return _max_bucket
 
 
 class Scheduler:
-    def __init__(self, page_manager: PageManager, batch_size: int = 4):
+    def __init__(
+        self,
+        page_manager: PageManager,
+        request_event: asyncio.Event,
+        batch_size: int = 4,
+    ):
         self.page_manager = page_manager
         self._page_size = page_manager.page_size
         self.batch_size = batch_size
-        self.prefill_bucket = _Bucket(self._page_size)
-        self.decode_bucket = _Bucket(self._page_size)
+        self.request_event = request_event
+        self._prefill_bucket = _Bucket(self._page_size)
+        self._decode_bucket = _Bucket(self._page_size)
+
+        self._prefill_before_decode: int = 0
+        self._max_prefill_before_decode: int = 2
 
     def add_request(self, sequence: Sequence):
         sequence.state = SequenceState.WAITING
-        self.prefill_bucket.add(sequence)
+        self._prefill_bucket.add(sequence)
+        self.request_event.set()
         logger.debug(
-            f"sequence: {sequence.s_id} added; # prefill: {len(self.prefill_bucket)}"
+            f"sequence: {sequence.s_id} added; # prefill: {len(self._prefill_bucket)}"
         )
 
     async def schedule(self) -> list[Sequence]:
-        if self.decode_bucket:
+        if (
+            self._prefill_bucket
+            and self._prefill_before_decode < self._max_prefill_before_decode
+        ):
+            self._prefill_before_decode += 1
+            return await self._get_batch("prefill")
+
+        if self._decode_bucket:
+            self._prefill_before_decode = 0
             return await self._get_batch("decode")
 
         return await self._get_batch("prefill")
@@ -81,21 +122,17 @@ class Scheduler:
         self, bucket_type: Literal["prefill", "decode"]
     ) -> list[Sequence]:
         batch: list[Sequence] = []
-        bucket = self.prefill_bucket if bucket_type == "prefill" else self.decode_bucket
+        bucket = (
+            self._prefill_bucket if bucket_type == "prefill" else self._decode_bucket
+        )
         bucket_idx = bucket.max_freq_bucket
         if bucket_idx is None:
             return batch
 
-        awaited = False
         while len(batch) < self.batch_size:
             sequence = bucket.get(bucket_idx)
             if sequence is None:
-                if awaited:
-                    break
-
-                awaited = True
-                await asyncio.sleep(0.1)
-                continue
+                break
 
             pages_needed = self._calculate_pages_needed(sequence=sequence)
             if not self.page_manager.can_allocate(sequence.s_id, pages_needed):
@@ -117,7 +154,7 @@ class Scheduler:
                 continue
 
             sequence.state = SequenceState.WAITING
-            self.decode_bucket.add(sequence)
+            self._decode_bucket.add(sequence)
 
     def _calculate_pages_needed(self, sequence: Sequence) -> int:
         # not prefilled yet
@@ -125,3 +162,11 @@ class Scheduler:
             return math.ceil(len(sequence) / self._page_size)
 
         return int(not (len(sequence) - 1) % self._page_size)
+
+    @property
+    def prefill_empty(self) -> bool:
+        return len(self._prefill_bucket) == 0
+
+    @property
+    def decode_empty(self) -> bool:
+        return len(self._decode_bucket) == 0

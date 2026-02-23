@@ -29,7 +29,12 @@ class InferlibEngine:
             dtype=torch.float32,
             device=torch.device("cpu"),
         )
-        self.scheduler = Scheduler(page_manager=self.page_manager, batch_size=4)
+        self.request_event = asyncio.Event()
+        self.scheduler = Scheduler(
+            page_manager=self.page_manager,
+            request_event=self.request_event,
+            batch_size=4,
+        )
         self.runner = Runner(llm=self.llm, page_manager=self.page_manager)
 
         self._sequence_to_queue: dict[str, Queue] = {}
@@ -133,7 +138,11 @@ class InferlibEngine:
             try:
                 batch = await self.scheduler.schedule()
                 if not batch:
-                    await asyncio.sleep(0.1)
+                    if self.scheduler.prefill_empty and self.scheduler.decode_empty:
+                        self.request_event.clear()
+                        await self.request_event.wait()
+                    else:
+                        await asyncio.sleep(0.05)  # no pages available, retry shortly
                     continue
 
                 await asyncio.to_thread(
