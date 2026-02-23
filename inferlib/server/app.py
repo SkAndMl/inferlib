@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
+from inferlib.core import SUPPORTED_MODEL_LIST
 from inferlib.server.apis.chat import router as chat_router
 from inferlib.server.apis.ui_chats import router as ui_chats_router
 from inferlib.server.db_client import get_db_client
@@ -38,9 +39,10 @@ async def get_models():
         "object": "list",
         "data": [
             {
-                "id": "Qwen/Qwen3-0.6B",
+                "id": model,
                 "object": "model",
                 "owned_by": "inferlib",
             }
+            for model in SUPPORTED_MODEL_LIST
         ],
     }
