@@ -195,6 +195,8 @@ async def get_db_client() -> DBClient:
         return _db_client
 
     async with _db_lock:
+        if _db_client is not None:
+            return _db_client
         db_path = Path(DB_PATH).expanduser().resolve()
         if db_path.is_dir():
             db_path = db_path / "chats.sqlite3"

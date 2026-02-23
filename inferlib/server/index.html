@@ -545,6 +545,11 @@
             }
         }
     </style>
+    <link
+        rel="stylesheet"
+        href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dompurify@3.2.6/dist/purify.min.js"></script>
 </head>
@@ -786,21 +791,95 @@
             });
         }
 
+        function renderKatexExpression(expression, displayMode) {
+            if (!window.katex || typeof window.katex.renderToString !== "function") {
+                return null;
+            }
+            try {
+                return window.katex.renderToString(expression, {
+                    displayMode,
+                    throwOnError: false,
+                });
+            } catch (_error) {
+                return null;
+            }
+        }
+
+        function applyMathPlaceholders(markdown) {
+            let text = String(markdown ?? "");
+            const mathHtml = [];
+
+            if (!window.katex || typeof window.katex.renderToString !== "function") {
+                return { text, mathHtml };
+            }
+
+            const codeBlocks = [];
+            text = text.replace(/```[\s\S]*?```/g, (block) => {
+                const token = `@@MATH_CODE_${codeBlocks.length}@@`;
+                codeBlocks.push(block);
+                return token;
+            });
+
+            text = text.replace(/`[^`\n]*`/g, (span) => {
+                const token = `@@MATH_CODE_${codeBlocks.length}@@`;
+                codeBlocks.push(span);
+                return token;
+            });
+
+            function pushMath(expression, displayMode) {
+                const token = `@@MATH_${mathHtml.length}@@`;
+                const rendered = renderKatexExpression(String(expression).trim(), displayMode);
+                if (rendered) {
+                    mathHtml.push(rendered);
+                } else {
+                    const wrapped = displayMode
+                        ? `$$${String(expression)}$$`
+                        : `$${String(expression)}$`;
+                    mathHtml.push(escapeHtml(wrapped));
+                }
+                return token;
+            }
+
+            text = text.replace(/\$\$([\s\S]+?)\$\$/g, (_match, expression) =>
+                pushMath(expression, true)
+            );
+
+            text = text.replace(/(?<!\\)\$([^\n$]+?)(?<!\\)\$/g, (_match, expression) =>
+                pushMath(expression, false)
+            );
+
+            text = text.replace(/@@MATH_CODE_(\d+)@@/g, (_match, idx) => {
+                return codeBlocks[Number(idx)] || "";
+            });
+
+            return { text, mathHtml };
+        }
+
+        function restoreMathPlaceholders(html, mathHtml) {
+            if (!mathHtml.length) {
+                return html;
+            }
+            return String(html).replace(/@@MATH_(\d+)@@/g, (_match, idx) => {
+                return mathHtml[Number(idx)] || "";
+            });
+        }
+
         function markdownToHtml(markdown) {
             const source = String(markdown ?? "");
+            const { text: sourceWithMath, mathHtml } = applyMathPlaceholders(source);
             if (window.marked && typeof window.marked.parse === "function") {
-                const rawHtml = window.marked.parse(source, {
+                const rawHtml = window.marked.parse(sourceWithMath, {
                     gfm: true,
                     breaks: true,
                 });
                 if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
-                    return window.DOMPurify.sanitize(rawHtml);
+                    return restoreMathPlaceholders(window.DOMPurify.sanitize(rawHtml), mathHtml);
                 }
-                return rawHtml;
+                return restoreMathPlaceholders(rawHtml, mathHtml);
             }
 
             const codeBlocks = [];
-            const normalized = source.replace(/\r\n/g, "\n");
+            const normalized = sourceWithMath.replace(/\r\n/g, "\n");
             const withPlaceholders = normalized.replace(
                 /```([\w-]+)?\n([\s\S]*?)```/g,
                 (_, lang = "", code) => {
@@ -915,9 +994,10 @@
             closeLists();
 
             const html = htmlParts.join("");
-            return html.replace(/@@CODEBLOCK_(\d+)@@/g, (_, idx) => {
+            const withCodeBlocks = html.replace(/@@CODEBLOCK_(\d+)@@/g, (_, idx) => {
                 return codeBlocks[Number(idx)] || "";
             });
+            return restoreMathPlaceholders(withCodeBlocks, mathHtml);
         }
 
         function splitThinkingSegments(content) {
