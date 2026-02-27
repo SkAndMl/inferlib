@@ -25,10 +25,6 @@ class Sequence:
         return len(self.prompt_tokens) + len(self.completion_tokens)
 
     @property
-    def sequence_length(self) -> int:
-        return len(self.prompt_tokens) + len(self.completion_tokens)
-
-    @property
     def is_finished(self) -> bool:
         return (
             self.last_token_id == self.eos_token_id

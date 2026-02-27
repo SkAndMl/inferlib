@@ -23,9 +23,7 @@ class _Bucket:
         if isinstance(sequences, Sequence):
             sequences = [sequences]
         for sequence in sequences:
-            bucket_idx = (
-                sequence.sequence_length + self.page_size - 1
-            ) // self.page_size
+            bucket_idx = (len(sequence) + self.page_size - 1) // self.page_size
 
             if bucket_idx not in self._buckets:
                 self._buckets[bucket_idx] = deque()
