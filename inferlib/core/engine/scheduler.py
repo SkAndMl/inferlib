@@ -133,10 +133,11 @@ class Scheduler:
                 break
 
             pages_needed = self._calculate_pages_needed(sequence=sequence)
-            if not self.page_manager.can_allocate(sequence.s_id, pages_needed):
+            if not self.page_manager.reserve(sequence.s_id, pages_needed):
                 bucket.add(sequences=sequence, append="left")
                 break
 
+            self.page_manager.commit(sequence.s_id)
             sequence.state = SequenceState.RUNNING
             batch.append(sequence)
 
