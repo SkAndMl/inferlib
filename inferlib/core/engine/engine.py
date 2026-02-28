@@ -1,4 +1,5 @@
 import asyncio
+import math
 import torch
 
 from asyncio import Queue
@@ -14,26 +15,47 @@ from inferlib.core.log import logger
 
 
 class InferlibEngine:
-    def __init__(self, model_class: str):
+    def __init__(
+        self,
+        model_class: str,
+        page_size: int = 32,
+        batch_size: int = 4,
+        max_active_sequences: int = 8,
+        memory_limit: int = 4 * 1024 * 1024 * 1024,  # 4 gb
+        dtype: torch.dtype = torch.float16,
+    ):
         assert model_class in SUPPORTED_MODEL_LIST
+
         self.llm, self.model_config = Qwen3.from_pretrained(model_class)
         self.tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
             model_class
         )
-        self.page_manager = PageManager(
-            num_pages=256,
+
+        self.num_pages = self.calc_num_pages(
+            dtype,
             num_layers=self.model_config.num_hidden_layers,
             num_heads=self.model_config.num_key_value_heads,
-            page_size=16,
             head_dim=self.model_config.head_dim,
-            dtype=torch.float32,
+            page_size=page_size,
+            memory_limit=memory_limit,
+        )
+        self.page_manager = PageManager(
+            num_pages=self.num_pages,
+            num_layers=self.model_config.num_hidden_layers,
+            num_heads=self.model_config.num_key_value_heads,
+            page_size=page_size,
+            head_dim=self.model_config.head_dim,
+            max_pages_per_sequence=self.num_pages // max_active_sequences,
+            dtype=dtype,
             device=torch.device("cpu"),
         )
         self.request_event = asyncio.Event()
         self.scheduler = Scheduler(
             page_manager=self.page_manager,
             request_event=self.request_event,
-            batch_size=4,
+            max_pages_per_sequence=self.num_pages // max_active_sequences,
+            batch_size=batch_size,
+            max_active_sequences=max_active_sequences,
         )
         self.runner = Runner(llm=self.llm, page_manager=self.page_manager)
 
@@ -42,6 +64,29 @@ class InferlibEngine:
         self._lock = asyncio.Lock()
 
         self._eot_token = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+
+        logger.info(
+            f"num_pages={self.num_pages}; max_tokens={self.num_pages * page_size}"
+        )
+
+    @staticmethod
+    def calc_num_pages(
+        dtype: torch.dtype,
+        num_layers: int,
+        num_heads: int,
+        head_dim: int,
+        page_size: int,
+        memory_limit: int,
+    ) -> int:
+        dtype_to_memory = {torch.float16: 2, torch.float32: 4}
+        if dtype not in dtype_to_memory:
+            raise ValueError(f"Unsupported dtype: {dtype}")
+        per_page_bytes = (
+            num_layers * num_heads * page_size * head_dim * dtype_to_memory[dtype] * 2
+        )
+        if per_page_bytes > memory_limit:
+            raise ValueError()
+        return math.floor(memory_limit / per_page_bytes)
 
     @staticmethod
     def _normalize_token_ids(tokens: object) -> list[int]:
@@ -91,7 +136,7 @@ class InferlibEngine:
         max_tokens: int = 4096,
         temperature: float = 0.1,
         enable_thinking: bool = False,
-    ) -> Queue:
+    ) -> Queue | None:
         if self._task is None:
             raise RuntimeError("Engine not started")
 
@@ -110,7 +155,9 @@ class InferlibEngine:
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        self.scheduler.add_request(sequence)
+        added: bool = self.scheduler.add_request(sequence)
+        if not added:
+            return
         q = Queue()
         self._sequence_to_queue[chat_id] = q
         return q

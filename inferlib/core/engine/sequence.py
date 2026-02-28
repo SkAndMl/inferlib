@@ -20,6 +20,7 @@ class Sequence:
     last_token_id: int = -1
     temperature: float = 0.1
     max_tokens: int = 200
+    tokens_evicted: int = 0
 
     def __len__(self) -> int:
         return len(self.prompt_tokens) + len(self.completion_tokens)

@@ -45,16 +45,27 @@ class PagePool:
         assert (offsets < self.page_size).all()
 
         k, v = kv
+        k = k.to(device=self.device, dtype=self.dtype, copy=False)
+        v = v.to(device=self.device, dtype=self.dtype, copy=False)
 
         assert k.shape == v.shape == (len(page_ids), self.num_heads, 1, self.head_dim)
+        if __debug__:
+            assert k.dtype == v.dtype == self.dtype
+            assert k.device == v.device == self._key_pool.device
 
         self._key_pool[page_ids, layer_id, :, offsets, :] = k.squeeze(dim=2)
         self._value_pool[page_ids, layer_id, :, offsets, :] = v.squeeze(dim=2)
 
     def write_page(self, page_ids: Tensor, layer_id: int, kv: tuple[Tensor, Tensor]):
-        length = kv[0].shape[2]
-        self._key_pool[page_ids, layer_id, :, :length, :] = kv[0]
-        self._value_pool[page_ids, layer_id, :, :length, :] = kv[1]
+        k, v = kv
+        k = k.to(device=self.device, dtype=self.dtype, copy=False)
+        v = v.to(device=self.device, dtype=self.dtype, copy=False)
+        length = k.shape[2]
+        if __debug__:
+            assert k.dtype == v.dtype == self.dtype
+            assert k.device == v.device == self._key_pool.device
+        self._key_pool[page_ids, layer_id, :, :length, :] = k
+        self._value_pool[page_ids, layer_id, :, :length, :] = v
 
     def read(self, page_id: Tensor, layer_id: int) -> tuple[Tensor, Tensor]:
         assert layer_id < self.num_layers
@@ -70,6 +81,7 @@ class PageManager:
     num_heads: int
     page_size: int
     head_dim: int
+    max_pages_per_sequence: int
     dtype: torch.dtype
     device: torch.device
 
@@ -89,9 +101,7 @@ class PageManager:
         self._page_info: list[PageInfo] = [PageInfo() for _ in range(self.num_pages)]
 
     def reserve(self, s_id: int, n: int) -> bool:
-        assert s_id not in self._reserved_pages, (
-            f"Sequence {s_id} already has reserved pages"
-        )
+        assert s_id not in self._reserved_pages, f"Sequence {s_id} already has reserved pages"
         if len(self._free_pages) < n:
             return False
         page_ids = [self._free_pages.popleft() for _ in range(n)]
@@ -144,7 +154,10 @@ class PageManager:
             dtype=torch.long,
         )
         offsets = torch.tensor(
-            data=[(len(seq) - 1) % self.page_size for seq in sequences],
+            data=[
+                (len(sequence) - sequence.tokens_evicted - 1) % self.page_size
+                for sequence in sequences
+            ],
             dtype=torch.long,
             device=self.device,
         )
@@ -173,9 +186,7 @@ class PageManager:
 
             yield self._page_pool.read(page_ids, layer_id)
 
-    def prefill(
-        self, sequences: list[Sequence], layer_id: int, kv: tuple[Tensor, Tensor]
-    ):
+    def prefill(self, sequences: list[Sequence], layer_id: int, kv: tuple[Tensor, Tensor]):
         k, v = kv
         num_pages = len(self._page_table[sequences[0].s_id])
         assert all(len(self._page_table[seq.s_id]) == num_pages for seq in sequences)
@@ -188,38 +199,32 @@ class PageManager:
             )
             _k = k[:, :, i * self.page_size : (i + 1) * self.page_size, :]
             _v = v[:, :, i * self.page_size : (i + 1) * self.page_size, :]
-            self._page_pool.write_page(
-                page_ids=page_ids, layer_id=layer_id, kv=(_k, _v)
-            )
+            self._page_pool.write_page(page_ids=page_ids, layer_id=layer_id, kv=(_k, _v))
+
+    def evict(self, s_id: int):
+        pid = self._page_table[s_id].pop(0)  # TODO: O(n) op, optimize later
+        self._page_info[pid].refcount -= 1
+        if self._page_info[pid].refcount == 0:
+            self._free_pages.append(pid)
 
     def get_num_pages(self, s_id: int) -> int:
         return len(self._page_table.get(s_id, []))
 
     def _check_invariants(self):
         allocated = [p for s_id in self._page_table for p in self._page_table[s_id]]
-        reserved = [
-            p for s_id in self._reserved_pages for p in self._reserved_pages[s_id]
-        ]
+        reserved = [p for s_id in self._reserved_pages for p in self._reserved_pages[s_id]]
 
         free_set = set(self._free_pages)
         allocated_set = set(allocated)
         reserved_set = set(reserved)
 
-        allocated_counts = Counter(allocated_set)
+        allocated_counts = Counter(allocated)
 
-        assert len(free_set) == len(self._free_pages), (
-            "Duplicate page_id in _free_pages"
-        )
-        assert len(reserved_set) == len(reserved), (
-            "Duplicate page_id in _reserved_pages"
-        )
+        assert len(free_set) == len(self._free_pages), "Duplicate page_id in _free_pages"
+        assert len(reserved_set) == len(reserved), "Duplicate page_id in _reserved_pages"
 
-        assert free_set.isdisjoint(reserved_set), (
-            "Page appears in both free and reserved set"
-        )
-        assert free_set.isdisjoint(allocated_set), (
-            "Page appears in both free and allocated set"
-        )
+        assert free_set.isdisjoint(reserved_set), "Page appears in both free and reserved set"
+        assert free_set.isdisjoint(allocated_set), "Page appears in both free and allocated set"
         assert reserved_set.isdisjoint(allocated_set), (
             "Page appears in both reserved and allocated set"
         )
@@ -234,14 +239,10 @@ class PageManager:
         for p in range(self.num_pages):
             expected = allocated_counts.get(p, 0)
             actual = self._page_info[p].refcount
-            assert expected == actual, (
-                f"refcount mismatch page={p}: {actual} != {expected}"
-            )
+            assert expected == actual, f"refcount mismatch page={p}: {actual} != {expected}"
 
         for p in reserved_set:
-            assert self._page_info[p].refcount == 0, (
-                "Reserved page has nonzero refcount"
-            )
+            assert self._page_info[p].refcount == 0, "Reserved page has nonzero refcount"
 
 
 __all__ = ["PageManager"]

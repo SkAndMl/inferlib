@@ -104,12 +104,8 @@ class Qwen3Attention(nn.Module):
             bias=cfg.attention_bias,
         )
 
-        self.q_norm = Qwen3RMSNorm(
-            hidden_size=cfg.head_dim, rms_norm_eps=cfg.rms_norm_eps
-        )
-        self.k_norm = Qwen3RMSNorm(
-            hidden_size=cfg.head_dim, rms_norm_eps=cfg.rms_norm_eps
-        )
+        self.q_norm = Qwen3RMSNorm(hidden_size=cfg.head_dim, rms_norm_eps=cfg.rms_norm_eps)
+        self.k_norm = Qwen3RMSNorm(hidden_size=cfg.head_dim, rms_norm_eps=cfg.rms_norm_eps)
 
         cos, sin = get_freqs_cis(cfg)
         self.register_buffer("cos", cos, persistent=False)
@@ -152,7 +148,10 @@ class Qwen3Attention(nn.Module):
             page_manager.read_pages(sequences=sequences, layer_id=self._layer_id)
         ):
             if i == num_pages - 1:
-                lens = [(len(seq) - 1) % page_manager.page_size for seq in sequences]
+                lens = [
+                    (len(sequence) - sequence.tokens_evicted - 1) % page_manager.page_size
+                    for sequence in sequences
+                ]
                 lens = [_l if _l > 0 else page_manager.page_size for _l in lens]
                 lens = torch.tensor(
                     lens,
@@ -164,9 +163,7 @@ class Qwen3Attention(nn.Module):
                 ).unsqueeze(0)
                 mask = indices < lens.unsqueeze(1)
             else:
-                mask = torch.ones(
-                    size=(q.shape[0], page_manager.page_size), device=q.device
-                ).bool()
+                mask = torch.ones(size=(q.shape[0], page_manager.page_size), device=q.device).bool()
             mask = mask[:, None, None, :]  # bsz, 1, 1, pg_size
 
             kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
@@ -181,9 +178,7 @@ class Qwen3Attention(nn.Module):
                 self.cfg.head_dim**0.5
             )  # bsz, head_dim, 1, pg_size
             S_i.masked_fill_(~mask, float("-inf"))
-            max_i: Tensor = torch.max(
-                S_i, dim=-1, keepdim=True
-            ).values  # bsz, head_dim, 1, 1
+            max_i: Tensor = torch.max(S_i, dim=-1, keepdim=True).values  # bsz, head_dim, 1, 1
 
             max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
             P_i = (S_i - max_new).exp()
@@ -199,9 +194,7 @@ class Qwen3Attention(nn.Module):
         S_i: Tensor = (qf @ kf_cur.transpose(-2, -1)) / (
             self.cfg.head_dim**0.5
         )  # bsz, head_dim, 1, pg_size
-        max_i: Tensor = torch.max(
-            S_i, dim=-1, keepdim=True
-        ).values  # bsz, head_dim, 1, 1
+        max_i: Tensor = torch.max(S_i, dim=-1, keepdim=True).values  # bsz, head_dim, 1, 1
 
         max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
         P_i = (S_i - max_new).exp()
@@ -230,29 +223,17 @@ class Qwen3Attention(nn.Module):
         k: Tensor = self.k_proj(x)
         v: Tensor = self.v_proj(x)
 
-        q = q.view(B, T, self.cfg.num_attention_heads, self.cfg.head_dim).transpose(
-            1, 2
-        )
-        k = k.view(B, T, self.cfg.num_key_value_heads, self.cfg.head_dim).transpose(
-            1, 2
-        )
-        v = v.view(B, T, self.cfg.num_key_value_heads, self.cfg.head_dim).transpose(
-            1, 2
-        )
+        q = q.view(B, T, self.cfg.num_attention_heads, self.cfg.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.cfg.num_key_value_heads, self.cfg.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.cfg.num_key_value_heads, self.cfg.head_dim).transpose(1, 2)
 
         q, k = self.q_norm(q), self.k_norm(k)
 
-        q = apply_rot_emb(
-            q, cos=self.cos, sin=self.sin, start_positions=start_positions
-        )
-        k = apply_rot_emb(
-            k, cos=self.cos, sin=self.sin, start_positions=start_positions
-        )
+        q = apply_rot_emb(q, cos=self.cos, sin=self.sin, start_positions=start_positions)
+        k = apply_rot_emb(k, cos=self.cos, sin=self.sin, start_positions=start_positions)
 
         if prefill and self.cfg.use_cache:
-            page_manager.prefill(
-                sequences=sequences, layer_id=self._layer_id, kv=(k, v)
-            )
+            page_manager.prefill(sequences=sequences, layer_id=self._layer_id, kv=(k, v))
 
         if self.cfg.use_cache and not prefill:
             y = self._online_attention(
@@ -264,12 +245,8 @@ class Qwen3Attention(nn.Module):
             )
 
         else:
-            k = k.repeat_interleave(
-                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
-            )
-            v = v.repeat_interleave(
-                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
-            )
+            k = k.repeat_interleave(self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1)
+            v = v.repeat_interleave(self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1)
 
             if mask is None:
                 mask: Tensor = torch.full(
@@ -348,9 +325,7 @@ class Qwen3(nn.Module, Model):
         self.layers = nn.ModuleList(
             [Qwen3DecoderLayer(cfg, i) for i in range(cfg.num_hidden_layers)]
         )
-        self.norm = Qwen3RMSNorm(
-            hidden_size=cfg.hidden_size, rms_norm_eps=cfg.rms_norm_eps
-        )
+        self.norm = Qwen3RMSNorm(hidden_size=cfg.hidden_size, rms_norm_eps=cfg.rms_norm_eps)
         self.lm_head = nn.Linear(
             in_features=cfg.hidden_size, out_features=cfg.vocab_size, bias=False
         )
@@ -379,9 +354,7 @@ class Qwen3(nn.Module, Model):
         return self.lm_head(self.norm(x))
 
     @classmethod
-    def from_pretrained(
-        cls, model_class="Qwen/Qwen3-0.6B"
-    ) -> tuple["Qwen3", Qwen3Config]:
+    def from_pretrained(cls, model_class="Qwen/Qwen3-0.6B") -> tuple["Qwen3", Qwen3Config]:
         hf_cfg = AutoConfig.from_pretrained(model_class).to_dict()
         cfg = Qwen3Config.from_dict(hf_cfg)
         hf_sd = AutoModelForCausalLM.from_pretrained(model_class).state_dict()
@@ -404,7 +377,7 @@ class Qwen3(nn.Module, Model):
     ) -> list[int]:
         B = len(sequences)
         device = self.embed_tokens.weight.device
-        max_len = max(len(seq) for seq in sequences)
+        max_len = max(len(sequence) for sequence in sequences)
         batch = torch.full(
             size=(B, max_len),
             fill_value=pad_token,
@@ -420,9 +393,7 @@ class Qwen3(nn.Module, Model):
         seq_lens = torch.zeros(size=(len(sequences),), device=device, dtype=torch.long)
         for i, sequence in enumerate(sequences):
             seq_lens[i] = len(sequence)
-            batch[i, : len(sequence)] = torch.tensor(
-                sequence.prompt_tokens, device=device
-            )
+            batch[i, : len(sequence)] = torch.tensor(sequence.prompt_tokens, device=device)
             mask[i, len(sequence) :, len(sequence) :] = 0
 
         logits: Tensor = self(
@@ -434,9 +405,7 @@ class Qwen3(nn.Module, Model):
             mask=mask,
         )  # bsz, max_len, embed_dim
 
-        temperatures = torch.tensor(
-            [(seq.temperature) for seq in sequences], device=device
-        )
+        temperatures = torch.tensor([(seq.temperature) for seq in sequences], device=device)
 
         row_idx = torch.arange(B, device=device)
         last_idx = seq_lens - 1
@@ -446,13 +415,11 @@ class Qwen3(nn.Module, Model):
         return sampled_idx.squeeze(1).tolist()
 
     @torch.inference_mode()
-    def decode(
-        self, *, sequences: list[Sequence], page_manager: PageManager
-    ) -> list[int]:
+    def decode(self, *, sequences: list[Sequence], page_manager: PageManager) -> list[int]:
         batch = torch.tensor([[seq.last_token_id] for seq in sequences])
         batch = batch.to(device=self.embed_tokens.weight.device)
         start_positions = torch.tensor(
-            [len(seq) - 1 for seq in sequences], device=self.embed_tokens.weight.device
+            [len(sequence) - 1 for sequence in sequences], device=self.embed_tokens.weight.device
         )
         logits: Tensor = self(
             batch,

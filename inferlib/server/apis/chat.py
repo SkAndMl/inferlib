@@ -24,6 +24,7 @@ from inferlib.server.models import (
 )
 
 _engine: InferlibEngine | None = None
+OVERSIZE_MESSAGE = "Your message is too big"
 
 
 @asynccontextmanager
@@ -39,9 +40,7 @@ async def lifespan(app: APIRouter):
 router = APIRouter(lifespan=lifespan)
 
 
-async def _content_generator(
-    chat_id: str, model: str, q: asyncio.Queue
-) -> AsyncIterator[ChatCompletionChunk | str]:
+async def _content_generator(chat_id: str, model: str, q: asyncio.Queue) -> AsyncIterator[ChatCompletionChunk | str]:
     parts: list[str] = []
     first_chunk: bool = True
 
@@ -67,9 +66,7 @@ async def _content_generator(
                 id=chat_id,
                 model=model,
                 created=int(time.time()),
-                choices=[
-                    StreamingChoice(index=0, delta=Delta(), finish_reason=finish_reason)
-                ],
+                choices=[StreamingChoice(index=0, delta=Delta(), finish_reason=finish_reason)],
             )
             yield "[DONE]"
             break
@@ -86,6 +83,44 @@ async def _sse_wrapper(generator) -> AsyncIterator[str]:
         yield f"data: {chunk_str}\n\n"
 
 
+def _build_oversize_response(chat_id: str, model: str) -> ChatCompletionResponse:
+    return ChatCompletionResponse(
+        id=chat_id,
+        created=int(time.time()),
+        model=model,
+        choices=[
+            Choice(
+                index=0,
+                message=Message(role="assistant", content=OVERSIZE_MESSAGE),
+                finish_reason="length",
+            )
+        ],
+        usage=UsageStats(prompt_tokens=0, completion_tokens=0, total_tokens=0),
+    )
+
+
+async def _oversize_content_generator(chat_id: str, model: str) -> AsyncIterator[ChatCompletionChunk | str]:
+    yield ChatCompletionChunk(
+        id=chat_id,
+        model=model,
+        created=int(time.time()),
+        choices=[
+            StreamingChoice(
+                index=0,
+                delta=Delta(role="assistant", content=OVERSIZE_MESSAGE),
+                finish_reason=None,
+            )
+        ],
+    )
+    yield ChatCompletionChunk(
+        id=chat_id,
+        model=model,
+        created=int(time.time()),
+        choices=[StreamingChoice(index=0, delta=Delta(), finish_reason="length")],
+    )
+    yield "[DONE]"
+
+
 @router.post("/v1/chat/completions")
 async def chat(payload: ChatCompletionRequest):
     logger.info(f"{payload=}")
@@ -98,6 +133,13 @@ async def chat(payload: ChatCompletionRequest):
         temperature=payload.temperature,
         enable_thinking=payload.thinking,
     )
+    if q is None:
+        if payload.stream:
+            return StreamingResponse(
+                _sse_wrapper(_oversize_content_generator(model=payload.model, chat_id=chat_id)),
+                media_type="text/event-stream",
+            )
+        return _build_oversize_response(chat_id=chat_id, model=payload.model)
 
     if payload.stream:
         return StreamingResponse(
@@ -111,9 +153,7 @@ async def chat(payload: ChatCompletionRequest):
         if isinstance(chunk, ChatCompletionChunk)
     ]
     finish_reason = streaming_choices[-1].finish_reason
-    content = "".join(
-        [choice.delta.content for choice in streaming_choices if choice.delta.content]
-    )
+    content = "".join([choice.delta.content for choice in streaming_choices if choice.delta.content])
     prompt_tokens = len(
         _engine.tokenizer.apply_chat_template(
             conversation=chat_history,
