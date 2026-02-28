@@ -121,6 +121,7 @@ class Qwen3Attention(nn.Module):
         sequences: list[Sequence],
         page_manager: PageManager,
     ) -> Tensor:
+        # TODO: address nan possibility in running_max
         bsz = q.shape[0]
         running_denom = torch.zeros(
             size=(bsz, self.cfg.num_attention_heads, 1, 1),
@@ -142,28 +143,22 @@ class Qwen3Attention(nn.Module):
             self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
         )
 
-        num_pages = page_manager.get_num_pages(sequences[0].s_id)
+        cached_lens = torch.tensor(
+            [(len(sequence) - sequence.tokens_evicted - 1) for sequence in sequences],
+            dtype=torch.long,
+            device=q.device,
+        )
+        indices = torch.arange(page_manager.page_size, dtype=torch.long, device=q.device).unsqueeze(
+            0
+        )
 
         for i, (k_i, v_i) in enumerate(
             page_manager.read_pages(sequences=sequences, layer_id=self._layer_id)
         ):
-            if i == num_pages - 1:
-                lens = [
-                    (len(sequence) - sequence.tokens_evicted - 1) % page_manager.page_size
-                    for sequence in sequences
-                ]
-                lens = [_l if _l > 0 else page_manager.page_size for _l in lens]
-                lens = torch.tensor(
-                    lens,
-                    dtype=torch.long,
-                    device=q.device,
-                )
-                indices = torch.arange(
-                    page_manager.page_size, dtype=torch.long, device=q.device
-                ).unsqueeze(0)
-                mask = indices < lens.unsqueeze(1)
-            else:
-                mask = torch.ones(size=(q.shape[0], page_manager.page_size), device=q.device).bool()
+            valid_indices = torch.clamp(
+                cached_lens - i * page_manager.page_size, 0, page_manager.page_size
+            )
+            mask = indices < valid_indices.unsqueeze(1)
             mask = mask[:, None, None, :]  # bsz, 1, 1, pg_size
 
             kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
