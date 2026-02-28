@@ -22,3 +22,6 @@ dev = [
 
 [project.scripts]
 inferlib = "inferlib.server.cli:main"
+
+[tool.ruff]
+line-length = 100

@@ -1341,6 +1341,24 @@
                 const errorText = await response.text();
                 throw new Error(`HTTP error ${response.status}: ${errorText}`);
             }
+            const contentType = response.headers.get("content-type") || "";
+            if (!contentType.toLowerCase().startsWith("text/event-stream")) {
+                const rawBody = await response.text();
+                if (!rawBody.trim()) {
+                    return;
+                }
+                try {
+                    const payload = JSON.parse(rawBody);
+                    const content = payload?.choices?.[0]?.message?.content;
+                    if (typeof content === "string" && content.length > 0) {
+                        onChunk(content);
+                    }
+                    return;
+                } catch (_error) {
+                    onChunk(rawBody);
+                    return;
+                }
+            }
             if (!response.body) {
                 throw new Error("Readable stream not available in response");
             }
