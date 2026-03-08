@@ -34,7 +34,7 @@ Open `http://localhost:8000` in your browser.
 
 ## Quick Start (from source)
 
-Requires Python 3.13+ and [uv](https://github.com/astral-sh/uv).
+Requires Python 3.13+, [uv](https://github.com/astral-sh/uv), and `npm`.
 
 ```bash
 git clone https://github.com/skandml/inferlib
@@ -43,11 +43,31 @@ uv sync
 inferlib serve
 ```
 
+`inferlib serve` automatically builds the frontend bundle on first run if needed, then serves the UI at `http://localhost:8000`.
+
 With a specific model:
 
 ```bash
 inferlib serve --model-class Qwen/Qwen3-1.7B
 ```
+
+## Frontend Development
+
+The production UI is served by FastAPI from a compiled React/Vite bundle.
+
+For hot-reload frontend work (optional):
+
+```bash
+# terminal 1
+inferlib serve
+
+# terminal 2
+cd frontend
+npm install
+npm run dev
+```
+
+Vite serves the React app on `http://localhost:5173` and proxies `/v1/*` and `/health` to the FastAPI server on `http://localhost:8000`.
 
 ## Usage
 
@@ -142,7 +162,17 @@ inferlib/
     ├── cli.py             # inferlib serve entrypoint
     ├── db_client.py       # SQLite via aiosqlite
     ├── models.py          # Pydantic request/response schemas
-    └── index.html         # chat UI
+    └── static/            # compiled React frontend bundle
+```
+
+```
+frontend/
+├── src/
+│   ├── components/        # chat UI building blocks
+│   ├── App.tsx            # app state and orchestration
+│   ├── api.ts             # browser API client
+│   └── markdown.ts        # markdown, math, and thinking parsing
+└── vite.config.ts         # frontend dev/build config
 ```
 
 **Paged KV Cache** — attention key/value tensors are stored in fixed-size pages rather than contiguous buffers. This avoids memory fragmentation and allows multiple sequences to share the memory pool efficiently.

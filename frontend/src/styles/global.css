@@ -1,0 +1,72 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap");
+
+:root {
+  color-scheme: light;
+  --font-sans: "Manrope", "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", monospace;
+  --text-primary: #1f1d1a;
+  --text-secondary: #5a554f;
+  --text-muted: #8a8278;
+  --panel-base: rgba(255, 255, 255, 0.88);
+  --panel-elevated: rgba(250, 249, 247, 0.92);
+  --border-strong: rgba(20, 20, 18, 0.08);
+  --border-subtle: rgba(20, 20, 18, 0.05);
+  --accent: #b9854f;
+  --accent-strong: #9d6d3b;
+  --app-bg-top: #f6f4f1;
+  --app-bg-bottom: #f3f1ee;
+  --shadow-soft: 0 6px 18px rgba(18, 18, 16, 0.05);
+  --shadow-medium: 0 12px 28px rgba(18, 18, 16, 0.08);
+  background: #f3f1ee;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --text-primary: #efede8;
+    --text-secondary: #c8c1b8;
+    --text-muted: #9a9288;
+    --panel-base: rgba(24, 24, 22, 0.92);
+    --panel-elevated: rgba(28, 28, 26, 0.94);
+    --border-strong: rgba(255, 255, 255, 0.08);
+    --border-subtle: rgba(255, 255, 255, 0.05);
+    --accent: #c08c56;
+    --accent-strong: #d49a5c;
+    --app-bg-top: #131311;
+    --app-bg-bottom: #10100f;
+    --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.22);
+    --shadow-medium: 0 14px 32px rgba(0, 0, 0, 0.3);
+    background: #10100f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: linear-gradient(180deg, var(--app-bg-top) 0%, var(--app-bg-bottom) 100%);
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+::selection {
+  background: rgba(185, 133, 79, 0.22);
+}
