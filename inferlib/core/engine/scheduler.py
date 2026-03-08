@@ -141,11 +141,11 @@ class Scheduler:
                 break
 
             pages_needed = self._calculate_pages_needed(sequence=sequence)
-            if not self.page_manager.reserve(sequence.s_id, pages_needed):
+            if not self.page_manager.reserve(sequence, pages_needed):
                 self._prefill_bucket.add(sequences=sequence, append="left")
                 break
 
-            self.page_manager.commit(sequence.s_id)
+            self.page_manager.commit(sequence)
             sequence.state = SequenceState.RUNNING
             self._active_sequences.add(sequence.s_id)
             batch.append(sequence)
@@ -161,17 +161,17 @@ class Scheduler:
             sequence = self._decode_bucket.popleft()
             pages_needed = self._calculate_pages_needed(sequence=sequence)
             if (
-                self.page_manager.get_num_pages(sequence.s_id) == self.max_pages_per_sequence
+                self.page_manager.get_num_pages(sequence) == self.max_pages_per_sequence
                 and pages_needed
             ):
-                self.page_manager.evict(sequence.s_id)
+                self.page_manager.evict(sequence)
                 sequence.tokens_evicted += self._page_size
 
-            if not self.page_manager.reserve(sequence.s_id, pages_needed):
+            if not self.page_manager.reserve(sequence, pages_needed):
                 self._decode_bucket.append(sequence)
                 break
 
-            self.page_manager.commit(sequence.s_id)
+            self.page_manager.commit(sequence)
             sequence.state = SequenceState.RUNNING
             self._active_sequences.add(sequence.s_id)
             batch.append(sequence)
@@ -184,7 +184,7 @@ class Scheduler:
             self._active_sequences.remove(sequence.s_id)
             if sequence.is_finished:
                 sequence.state = SequenceState.FINISHED
-                self.page_manager.free(sequence.s_id)
+                self.page_manager.free(sequence)
                 logger.info(f"{sequence.s_id} finished...")
                 continue
 

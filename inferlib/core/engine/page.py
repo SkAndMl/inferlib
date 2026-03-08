@@ -3,6 +3,7 @@ import torch
 from collections import Counter, deque
 from dataclasses import dataclass
 from torch import Tensor
+from typing import Optional
 
 from inferlib.core.engine.sequence import Sequence
 
@@ -37,34 +38,26 @@ class _PagePool:
         self,
         page_ids: Tensor,
         layer_id: int,
-        offsets: Tensor,
         kv: tuple[Tensor, Tensor],
+        offsets: Optional[Tensor] = None,
     ):
         assert layer_id < self.num_layers
-        assert (offsets < self.page_size).all()
 
         k, v = kv
         k = k.to(device=self.device, dtype=self.dtype, copy=False)
         v = v.to(device=self.device, dtype=self.dtype, copy=False)
 
-        assert k.shape == v.shape == (len(page_ids), self.num_heads, 1, self.head_dim)
-        if __debug__:
-            assert k.dtype == v.dtype == self.dtype
-            assert k.device == v.device == self._key_pool.device
+        if offsets is not None:
+            assert (offsets < self.page_size).all()
+            assert k.shape == v.shape == (len(page_ids), self.num_heads, 1, self.head_dim)
 
-        self._key_pool[page_ids, layer_id, :, offsets, :] = k.squeeze(dim=2)
-        self._value_pool[page_ids, layer_id, :, offsets, :] = v.squeeze(dim=2)
+            self._key_pool[page_ids, layer_id, :, offsets, :] = k.squeeze(dim=2)
+            self._value_pool[page_ids, layer_id, :, offsets, :] = v.squeeze(dim=2)
 
-    def write_page(self, page_ids: Tensor, layer_id: int, kv: tuple[Tensor, Tensor]):
-        k, v = kv
-        k = k.to(device=self.device, dtype=self.dtype, copy=False)
-        v = v.to(device=self.device, dtype=self.dtype, copy=False)
-        length = k.shape[2]
-        if __debug__:
-            assert k.dtype == v.dtype == self.dtype
-            assert k.device == v.device == self._key_pool.device
-        self._key_pool[page_ids, layer_id, :, :length, :] = k
-        self._value_pool[page_ids, layer_id, :, :length, :] = v
+        else:
+            length = k.shape[2]
+            self._key_pool[page_ids, layer_id, :, :length, :] = k
+            self._value_pool[page_ids, layer_id, :, :length, :] = v
 
     def read(self, page_ids: Tensor, layer_id: int) -> tuple[Tensor, Tensor]:
         assert layer_id < self.num_layers
@@ -99,7 +92,8 @@ class PageManager:
         self._free_pages = deque(range(self.num_pages))
         self._page_info: list[PageInfo] = [PageInfo() for _ in range(self.num_pages)]
 
-    def reserve(self, s_id: int, n: int) -> bool:
+    def reserve(self, sequence: Sequence, n: int) -> bool:
+        s_id = sequence.s_id
         assert s_id not in self._reserved_pages, f"Sequence {s_id} already has reserved pages"
         if len(self._free_pages) < n:
             return False
@@ -111,7 +105,8 @@ class PageManager:
 
         return True
 
-    def commit(self, s_id: int) -> None:
+    def commit(self, sequence: Sequence) -> None:
+        s_id = sequence.s_id
         if s_id not in self._page_table:
             self._page_table[s_id] = []
 
@@ -123,14 +118,14 @@ class PageManager:
         if __debug__:
             self._check_invariants()
 
-    def abort(self, s_id: int) -> None:
-        self._free_pages.extend(self._reserved_pages.pop(s_id))
+    def abort(self, sequence: Sequence) -> None:
+        self._free_pages.extend(self._reserved_pages.pop(sequence.s_id))
 
         if __debug__:
             self._check_invariants()
 
-    def free(self, s_id: int):
-        page_ids: list[int] = self._page_table.pop(s_id)
+    def free(self, sequence: Sequence):
+        page_ids: list[int] = self._page_table.pop(sequence.s_id)
         for page_id in page_ids:
             info = self._page_info[page_id]
             info.refcount -= 1
@@ -148,7 +143,7 @@ class PageManager:
         kv: tuple[Tensor, Tensor],
     ):
         page_ids = torch.tensor(
-            [self._page_table[seq.s_id][-1] for seq in sequences],
+            [self._page_table[sequence.s_id][-1] for sequence in sequences],
             device=self.device,
             dtype=torch.long,
         )
@@ -207,16 +202,16 @@ class PageManager:
             )
             _k = k[:, :, i * self.page_size : (i + 1) * self.page_size, :]
             _v = v[:, :, i * self.page_size : (i + 1) * self.page_size, :]
-            self._page_pool.write_page(page_ids=page_ids, layer_id=layer_id, kv=(_k, _v))
+            self._page_pool.write(page_ids=page_ids, layer_id=layer_id, kv=(_k, _v))
 
-    def evict(self, s_id: int):
-        pid = self._page_table[s_id].pop(0)  # TODO: O(n) op, optimize later
+    def evict(self, sequence: Sequence):
+        pid = self._page_table[sequence.s_id].pop(0)  # TODO: O(n) op, optimize later
         self._page_info[pid].refcount -= 1
         if self._page_info[pid].refcount == 0:
             self._free_pages.append(pid)
 
-    def get_num_pages(self, s_id: int) -> int:
-        return len(self._page_table.get(s_id, []))
+    def get_num_pages(self, sequence: Sequence) -> int:
+        return len(self._page_table.get(sequence.s_id, []))
 
     def _check_invariants(self):
         allocated = [p for s_id in self._page_table for p in self._page_table[s_id]]
