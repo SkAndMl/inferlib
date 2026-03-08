@@ -113,6 +113,38 @@ class Qwen3Attention(nn.Module):
 
         self._layer_id = _layer_id
 
+    def _online_step(
+        self,
+        qf: Tensor,
+        kf: Tensor,
+        vf: Tensor,
+        mask: Tensor,
+        running_max: Tensor,
+        running_denom: Tensor,
+        y: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        scores: Tensor = (qf @ kf.transpose(-2, -1)) / (self.cfg.head_dim**0.5)
+        scores.masked_fill_(~mask, float("-inf"))
+        max_i: Tensor = torch.max(scores, dim=-1, keepdim=True).values
+
+        # Rows with all keys masked should be a no-op for the online softmax state.
+        any_valid = mask.any(dim=-1, keepdim=True)
+        max_i_safe = torch.where(any_valid, max_i, running_max)
+        max_new = torch.maximum(running_max, max_i_safe)
+        probs = torch.where(any_valid, (scores - max_new).exp(), torch.zeros_like(scores))
+        denom_i = probs.sum(dim=-1, keepdim=True)
+
+        alpha = torch.where(
+            any_valid,
+            (running_max - max_new).exp(),
+            torch.ones_like(running_max),
+        )
+        running_denom = alpha * running_denom + denom_i
+        y = y * alpha + (probs @ vf)
+        running_max = max_new
+
+        return running_max, running_denom, y
+
     def _online_attention(
         self,
         q: Tensor,
@@ -148,18 +180,27 @@ class Qwen3Attention(nn.Module):
             dtype=torch.long,
             device=q.device,
         )
-        indices = torch.arange(page_manager.page_size, dtype=torch.long, device=q.device).unsqueeze(
-            0
-        )
+        indices = torch.arange(
+            page_manager.page_size,
+            dtype=torch.long,
+            device=q.device,
+        ).unsqueeze(0)
+        page_table = page_manager.build_page_table(sequences=sequences)  # bsz, max_pages
+        max_pages = page_table.shape[-1]
 
-        for i, (k_i, v_i) in enumerate(
-            page_manager.read_pages(sequences=sequences, layer_id=self._layer_id)
-        ):
+        for i in range(max_pages):
             valid_indices = torch.clamp(
                 cached_lens - i * page_manager.page_size, 0, page_manager.page_size
             )
-            mask = indices < valid_indices.unsqueeze(1)
-            mask = mask[:, None, None, :]  # bsz, 1, 1, pg_size
+            token_mask = indices < valid_indices.unsqueeze(1)
+            token_mask = token_mask[:, None, None, :]
+
+            k_i, v_i, page_mask = page_manager.read_page(
+                page_table=page_table,
+                layer_id=self._layer_id,
+                page_idx=i,
+            )
+            mask = token_mask & page_mask
 
             kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
             kf = kf.repeat_interleave(
@@ -168,37 +209,31 @@ class Qwen3Attention(nn.Module):
             vf = vf.repeat_interleave(
                 self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
             )
+            running_max, running_denom, y = self._online_step(
+                qf=qf,
+                kf=kf,
+                vf=vf,
+                mask=mask,
+                running_max=running_max,
+                running_denom=running_denom,
+                y=y,
+            )
 
-            S_i: Tensor = (qf @ kf.transpose(-2, -1)) / (
-                self.cfg.head_dim**0.5
-            )  # bsz, head_dim, 1, pg_size
-            S_i.masked_fill_(~mask, float("-inf"))
-            max_i: Tensor = torch.max(S_i, dim=-1, keepdim=True).values  # bsz, head_dim, 1, 1
-
-            max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
-            P_i = (S_i - max_new).exp()
-            denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
-
-            alpha = (running_max - max_new).exp()
-            running_denom = alpha * running_denom + denom_i
-            y = y * alpha + (P_i @ vf)
-
-            # update max
-            running_max = max_new
-
-        S_i: Tensor = (qf @ kf_cur.transpose(-2, -1)) / (
-            self.cfg.head_dim**0.5
-        )  # bsz, head_dim, 1, pg_size
-        max_i: Tensor = torch.max(S_i, dim=-1, keepdim=True).values  # bsz, head_dim, 1, 1
-
-        max_new = torch.maximum(running_max, max_i)  # bsz, head_dim, 1, 1
-        P_i = (S_i - max_new).exp()
-        denom_i = P_i.sum(dim=-1, keepdim=True)  # bsz, head_dim, 1, 1
-
-        alpha = (running_max - max_new).exp()
-        running_denom = alpha * running_denom + denom_i
-        y = y * alpha + (P_i @ vf_cur)
-        y /= running_denom
+        cur_mask = torch.ones(
+            size=(qf.shape[0], 1, 1, kf_cur.shape[-2]),
+            dtype=torch.bool,
+            device=q.device,
+        )
+        running_max, running_denom, y = self._online_step(
+            qf=qf,
+            kf=kf_cur,
+            vf=vf_cur,
+            mask=cur_mask,
+            running_max=running_max,
+            running_denom=running_denom,
+            y=y,
+        )
+        y /= running_denom.clamp_min(1e-12)
 
         page_manager.write(sequences, self._layer_id, (k, v))
         return y.to(q.dtype)
