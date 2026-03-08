@@ -481,7 +481,7 @@ export default function App() {
   }
 
   const shellStyle = {
-    "--sidebar-width": isDesktopSidebarCollapsed ? "0px" : "280px",
+    "--sidebar-width": isDesktopSidebarCollapsed ? "72px" : "280px",
   } as CSSProperties;
 
   return (
@@ -492,6 +492,7 @@ export default function App() {
         isDesktopCollapsed={isDesktopSidebarCollapsed}
         isGenerating={isGenerating}
         isMobileOpen={isMobileSidebarOpen}
+        onToggleSidebar={handleToggleSidebar}
         onDeleteChat={(chatId) => {
           void handleDeleteChat(chatId);
         }}
@@ -516,10 +517,8 @@ export default function App() {
 
       <main className={styles.main}>
         <Topbar
-          isSidebarCollapsed={isDesktopSidebarCollapsed}
           isGenerating={isGenerating}
           modelId={modelId}
-          onToggleSidebar={handleToggleSidebar}
           onToggleThinking={() => {
             if (!isGenerating) {
               setThinkingEnabled((current) => !current);

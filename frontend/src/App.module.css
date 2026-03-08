@@ -2,6 +2,7 @@
   min-height: 100vh;
   display: grid;
   grid-template-columns: var(--sidebar-width, 280px) minmax(0, 1fr);
+  --chat-column-width: 860px;
   background:
     linear-gradient(180deg, var(--app-bg-top) 0%, var(--app-bg-bottom) 100%);
   color: var(--text-primary);
@@ -39,7 +40,7 @@
 }
 
 .content {
-  max-width: 860px;
+  max-width: var(--chat-column-width);
   margin: 0 auto;
   padding: 0.75rem 1.25rem 7rem;
 }

@@ -10,26 +10,9 @@
   backdrop-filter: blur(12px);
 }
 
-.menuButton {
-  border: 1px solid var(--border-strong);
-  background: rgba(255, 255, 255, 0.7);
-  color: var(--text-primary);
-  border-radius: 10px;
-  padding: 0.52rem 0.72rem;
-  font: inherit;
-  font-size: 0.78rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 140ms ease, border-color 140ms ease;
-}
-
-.menuButton:hover {
-  background: rgba(255, 255, 255, 0.96);
-  border-color: rgba(16, 24, 40, 0.14);
-}
-
 .titleGroup {
   min-width: 0;
+  flex: 1;
 }
 
 .title {

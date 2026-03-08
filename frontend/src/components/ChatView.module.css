@@ -6,7 +6,7 @@
 
 .emptyState {
   margin: auto;
-  max-width: 680px;
+  max-width: var(--chat-column-width);
   padding: 2.5rem 1rem;
   text-align: left;
 }
