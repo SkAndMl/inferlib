@@ -1,0 +1,55 @@
+.shell {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: var(--sidebar-width, 280px) minmax(0, 1fr);
+  background:
+    linear-gradient(180deg, var(--app-bg-top) 0%, var(--app-bg-bottom) 100%);
+  color: var(--text-primary);
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(18, 23, 30, 0.34);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms ease;
+  z-index: 15;
+  border: none;
+  padding: 0;
+}
+
+.backdropVisible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.scrollArea {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.content {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0.75rem 1.25rem 7rem;
+}
+
+@media (max-width: 960px) {
+  .shell {
+    display: flex;
+  }
+
+  .content {
+    padding: 0.4rem 1rem 6.5rem;
+  }
+}

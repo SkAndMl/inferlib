@@ -1,0 +1,36 @@
+.stream {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+}
+
+.emptyState {
+  margin: auto;
+  max-width: 680px;
+  padding: 2.5rem 1rem;
+  text-align: left;
+}
+
+.emptyEyebrow {
+  margin: 0 0 0.75rem;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text-muted);
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: clamp(1.6rem, 4.8vw, 2.8rem);
+  line-height: 1.02;
+  letter-spacing: -0.05em;
+  color: var(--text-primary);
+}
+
+.emptyBody {
+  max-width: 480px;
+  margin: 0.8rem 0 0;
+  font-size: 0.94rem;
+  line-height: 1.6;
+  color: var(--text-secondary);
+}

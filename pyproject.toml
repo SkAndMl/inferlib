@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "inferlib"
 version = "0.2.5"
@@ -22,6 +26,9 @@ dev = [
 
 [project.scripts]
 inferlib = "inferlib.server.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["inferlib*"]
 
 [tool.ruff]
 line-length = 100

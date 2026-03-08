@@ -1,3 +1,13 @@
+FROM node:23-slim AS frontend-build
+
+WORKDIR /frontend
+
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
 FROM python:3.13-slim
 
 WORKDIR /app
@@ -8,6 +18,7 @@ COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project
 
 COPY inferlib/ ./inferlib/
+COPY --from=frontend-build /frontend/dist ./inferlib/server/static/
 RUN uv sync --frozen
 
 ENV PATH="/app/.venv/bin:$PATH"
