@@ -40,12 +40,10 @@ Requires Python 3.13+, [uv](https://github.com/astral-sh/uv), and `npm`.
 git clone https://github.com/skandml/inferlib
 cd inferlib
 uv sync
-cd frontend
-npm install
-npm run build
-cd ..
 inferlib serve
 ```
+
+`inferlib serve` automatically builds the frontend bundle on first run if needed, then serves the UI at `http://localhost:8000`.
 
 With a specific model:
 
@@ -57,7 +55,7 @@ inferlib serve --model-class Qwen/Qwen3-1.7B
 
 The production UI is served by FastAPI from a compiled React/Vite bundle.
 
-For local frontend work:
+For hot-reload frontend work (optional):
 
 ```bash
 # terminal 1

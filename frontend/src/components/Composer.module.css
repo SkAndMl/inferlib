@@ -24,13 +24,13 @@
   border: none;
   background: transparent;
   resize: none;
-  min-height: 28px;
+  min-height: 42px;
   max-height: 220px;
-  padding: 0.28rem 0.1rem;
+  padding: 0.56rem 0.1rem;
   color: var(--text-primary);
   font: inherit;
   font-size: 0.96rem;
-  line-height: 1.5;
+  line-height: 1.35;
   outline: none;
 }
 

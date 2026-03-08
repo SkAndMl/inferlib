@@ -30,8 +30,15 @@ FRONTEND_DIST_DIR = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
 def get_frontend_dir() -> Path:
-    if (SERVER_STATIC_DIR / "index.html").exists():
+    frontend_dist_index = FRONTEND_DIST_DIR / "index.html"
+    server_static_index = SERVER_STATIC_DIR / "index.html"
+
+    if frontend_dist_index.exists():
+        return FRONTEND_DIST_DIR
+
+    if server_static_index.exists():
         return SERVER_STATIC_DIR
+
     return FRONTEND_DIST_DIR
 
 
