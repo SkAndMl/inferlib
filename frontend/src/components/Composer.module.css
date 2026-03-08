@@ -1,0 +1,85 @@
+.shell {
+  position: sticky;
+  bottom: 0;
+  padding: 0.8rem 1.25rem 1rem;
+  background: linear-gradient(180deg, rgba(243, 241, 238, 0), rgba(243, 241, 238, 0.94) 34%, rgba(243, 241, 238, 0.98));
+  backdrop-filter: blur(10px);
+}
+
+.composer {
+  max-width: var(--chat-column-width);
+  margin: 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
+  padding: 0.72rem 0.82rem;
+  border-radius: 18px;
+  border: 1px solid var(--border-strong);
+  background: var(--panel-base);
+  box-shadow: var(--shadow-soft);
+}
+
+.input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  resize: none;
+  min-height: 42px;
+  max-height: 220px;
+  padding: 0.56rem 0.1rem;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.96rem;
+  line-height: 1.35;
+  outline: none;
+}
+
+.input::placeholder {
+  color: var(--text-muted);
+}
+
+.sendButton {
+  border: 1px solid rgba(163, 112, 59, 0.12);
+  border-radius: 12px;
+  padding: 0.68rem 0.96rem;
+  background: rgba(185, 133, 79, 0.14);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, opacity 140ms ease;
+}
+
+.sendButton:hover:not(:disabled) {
+  background: rgba(185, 133, 79, 0.22);
+  border-color: rgba(163, 112, 59, 0.22);
+}
+
+.sendButton:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.caption {
+  max-width: var(--chat-column-width);
+  margin: 0.48rem auto 0;
+  padding: 0 0.2rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+
+@media (max-width: 960px) {
+  .shell {
+    padding: 0.75rem 0.9rem 0.9rem;
+  }
+
+  .composer {
+    padding: 0.7rem 0.78rem;
+    border-radius: 16px;
+  }
+
+  .sendButton {
+    padding: 0.64rem 0.88rem;
+  }
+}
