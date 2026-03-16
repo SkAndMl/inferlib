@@ -8,6 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+frontend/node_modules/
+frontend/dist/
 
 .DS_STORE
 
