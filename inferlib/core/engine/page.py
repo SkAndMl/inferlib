@@ -1,3 +1,4 @@
+import hashlib
 import torch
 
 from collections import Counter, deque
@@ -6,11 +7,6 @@ from torch import Tensor
 from typing import Optional
 
 from inferlib.core.engine.sequence import Sequence
-
-
-@dataclass
-class PageInfo:
-    refcount: int = 0
 
 
 @dataclass
@@ -67,6 +63,14 @@ class _PagePool:
 
 
 @dataclass
+class Page:
+    page_id: int
+    page_hash: str = None
+    parent_hash: Optional[str] = None
+    refcount: int = 0
+
+
+@dataclass
 class PageManager:
     num_pages: int
     num_layers: int
@@ -89,8 +93,9 @@ class PageManager:
         )
         self._page_table: dict[int, list[int]] = {}
         self._reserved_pages: dict[int, list[int]] = {}
+        # TODO: convert free_pages and page_info to a doubly linked list?
         self._free_pages = deque(range(self.num_pages))
-        self._page_info: list[PageInfo] = [PageInfo() for _ in range(self.num_pages)]
+        self._page_info: list[Page] = [Page(page_id=i) for i in range(self.num_pages)]
 
     def reserve(self, sequence: Sequence, n: int) -> bool:
         s_id = sequence.s_id
@@ -131,6 +136,8 @@ class PageManager:
             info.refcount -= 1
             assert info.refcount >= 0
             if info.refcount == 0:
+                info.page_hash = None
+                info.parent_hash = None
                 self._free_pages.append(page_id)
 
         if __debug__:
@@ -161,6 +168,26 @@ class PageManager:
             offsets=offsets,
             kv=kv,
         )
+
+        ## cache
+        if layer_id != self.num_layers - 1:
+            return
+
+        for sequence in sequences:
+            # check if last page of the sequence has been filled
+            if (len(sequence) - sequence.tokens_evicted) % self.page_size != 0:
+                continue
+            page_ids = self._page_table[sequence.s_id]
+            cur_page_id = page_ids[-1]
+
+            parent_hash = None
+            if len(page_ids) > 1:
+                parent_hash = self._page_info[page_ids[-2]].page_hash
+
+            cur_page_tokens = sequence.tokens[-self.page_size :]
+            cur_page_hash = self._stable_hash((parent_hash, cur_page_tokens))
+            self._page_info[cur_page_id].parent_hash = parent_hash
+            self._page_info[cur_page_id].page_hash = cur_page_hash
 
     def build_page_table(self, sequences: list[Sequence]) -> Tensor:
         page_ids: list[list[int]] = [
@@ -200,18 +227,48 @@ class PageManager:
                 dtype=torch.long,
                 device=self.device,
             )
+
             _k = k[:, :, i * self.page_size : (i + 1) * self.page_size, :]
             _v = v[:, :, i * self.page_size : (i + 1) * self.page_size, :]
             self._page_pool.write(page_ids=page_ids, layer_id=layer_id, kv=(_k, _v))
+
+            ## prefix cache
+            if layer_id != self.num_layers - 1:
+                continue
+            for sequence in sequences:
+                page_tokens: list[int] = sequence.prompt_tokens[
+                    i * self.page_size : (i + 1) * self.page_size
+                ]
+                if len(page_tokens) != self.page_size:  # partially filled page; skip
+                    continue
+
+                page_id = self._page_table[sequence.s_id][i]
+                parent_hash = None
+                if i > 0:
+                    parent_page_id = self._page_table[sequence.s_id][i - 1]
+                    parent_hash = self._page_info[parent_page_id].page_hash
+
+                page_hash = self._stable_hash((parent_hash, page_tokens))
+                self._page_info[page_id].parent_hash = parent_hash
+                self._page_info[page_id].page_hash = page_hash
 
     def evict(self, sequence: Sequence):
         pid = self._page_table[sequence.s_id].pop(0)  # TODO: O(n) op, optimize later
         self._page_info[pid].refcount -= 1
         if self._page_info[pid].refcount == 0:
+            self._page_info[pid].page_hash = None
+            self._page_info[pid].parent_hash = None
             self._free_pages.append(pid)
 
     def get_num_pages(self, sequence: Sequence) -> int:
         return len(self._page_table.get(sequence.s_id, []))
+
+    def _stable_hash(self, parts: tuple[object, ...]) -> str:
+        h = hashlib.sha256()
+        for part in parts:
+            h.update(repr(part).encode("utf-8"))
+            h.update(b"|")
+        return h.hexdigest()
 
     def _check_invariants(self):
         allocated = [p for s_id in self._page_table for p in self._page_table[s_id]]

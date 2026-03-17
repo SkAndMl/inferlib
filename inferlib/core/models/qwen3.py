@@ -153,7 +153,6 @@ class Qwen3Attention(nn.Module):
         sequences: list[Sequence],
         page_manager: PageManager,
     ) -> Tensor:
-        # TODO: address nan possibility in running_max
         bsz = q.shape[0]
         running_denom = torch.zeros(
             size=(bsz, self.cfg.num_attention_heads, 1, 1),

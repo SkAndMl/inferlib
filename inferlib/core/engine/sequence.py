@@ -39,3 +39,7 @@ class Sequence:
         if len(self.completion_tokens) == self.max_tokens:
             return "length"
         return None
+
+    @property
+    def tokens(self) -> list[int]:
+        return self.prompt_tokens + self.completion_tokens
