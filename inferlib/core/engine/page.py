@@ -93,9 +93,11 @@ class PageManager:
         )
         self._page_table: dict[int, list[int]] = {}
         self._reserved_pages: dict[int, list[int]] = {}
-        # TODO: convert free_pages and page_info to a doubly linked list?
+
         self._free_pages = deque(range(self.num_pages))
         self._page_info: list[Page] = [Page(page_id=i) for i in range(self.num_pages)]
+
+        self._cache: dict[str, int] = {}  # hash -> page_id
 
     def reserve(self, sequence: Sequence, n: int) -> bool:
         s_id = sequence.s_id
@@ -136,6 +138,8 @@ class PageManager:
             info.refcount -= 1
             assert info.refcount >= 0
             if info.refcount == 0:
+                if info.page_hash and info.page_hash in self._cache:
+                    del self._cache[info.page_hash]
                 info.page_hash = None
                 info.parent_hash = None
                 self._free_pages.append(page_id)
@@ -143,78 +147,16 @@ class PageManager:
         if __debug__:
             self._check_invariants()
 
-    def write(
-        self,
-        sequences: list[Sequence],
-        layer_id: int,
-        kv: tuple[Tensor, Tensor],
-    ):
-        page_ids = torch.tensor(
-            [self._page_table[sequence.s_id][-1] for sequence in sequences],
-            device=self.device,
-            dtype=torch.long,
-        )
-        offsets = torch.tensor(
-            data=[
-                (len(sequence) - sequence.tokens_evicted - 1) % self.page_size
-                for sequence in sequences
-            ],
-            dtype=torch.long,
-            device=self.device,
-        )
-        self._page_pool.write(
-            page_ids=page_ids,
-            layer_id=layer_id,
-            offsets=offsets,
-            kv=kv,
-        )
-
-        ## cache
-        if layer_id != self.num_layers - 1:
-            return
-
-        for sequence in sequences:
-            # check if last page of the sequence has been filled
-            if (len(sequence) - sequence.tokens_evicted) % self.page_size != 0:
-                continue
-            page_ids = self._page_table[sequence.s_id]
-            cur_page_id = page_ids[-1]
-
-            parent_hash = None
-            if len(page_ids) > 1:
-                parent_hash = self._page_info[page_ids[-2]].page_hash
-
-            cur_page_tokens = sequence.tokens[-self.page_size :]
-            cur_page_hash = self._stable_hash((parent_hash, cur_page_tokens))
-            self._page_info[cur_page_id].parent_hash = parent_hash
-            self._page_info[cur_page_id].page_hash = cur_page_hash
-
-    def build_page_table(self, sequences: list[Sequence]) -> Tensor:
-        page_ids: list[list[int]] = [
-            self._page_table.get(sequence.s_id, []) for sequence in sequences
-        ]
-        max_pages = max(len(_) for _ in page_ids)
-        page_table = torch.full(size=(len(sequences), max_pages), fill_value=-1, dtype=torch.long)
-        for i, _page_ids in enumerate(page_ids):
-            page_table[i, : len(_page_ids)] = torch.tensor(_page_ids, dtype=torch.long)
-
-        return page_table.to(device=self.device)
-
-    def read_page(
-        self,
-        page_table: Tensor,
-        layer_id: int,
-        page_idx: int,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        page_ids = page_table[:, page_idx]
-        valid = page_ids != -1
-        safe_page_ids = page_ids.masked_fill(~valid, 0)
-
-        k, v = self._page_pool.read(page_ids=safe_page_ids, layer_id=layer_id)
-        valid = valid[:, None, None, None]
-        k = k * valid
-        v = v * valid
-        return k, v, valid
+    def evict(self, sequence: Sequence):
+        pid = self._page_table[sequence.s_id].pop(0)  # TODO: O(n) op, optimize later
+        page_info = self._page_info[pid]
+        page_info.refcount -= 1
+        if self._page_info[pid].refcount == 0:
+            if page_info.page_hash and page_info.page_hash in self._cache:
+                del self._cache[page_info.page_hash]
+            page_info.page_hash = None
+            page_info.parent_hash = None
+            self._free_pages.append(pid)
 
     def prefill(self, sequences: list[Sequence], layer_id: int, kv: tuple[Tensor, Tensor]):
         k, v = kv
@@ -252,13 +194,82 @@ class PageManager:
                 self._page_info[page_id].parent_hash = parent_hash
                 self._page_info[page_id].page_hash = page_hash
 
-    def evict(self, sequence: Sequence):
-        pid = self._page_table[sequence.s_id].pop(0)  # TODO: O(n) op, optimize later
-        self._page_info[pid].refcount -= 1
-        if self._page_info[pid].refcount == 0:
-            self._page_info[pid].page_hash = None
-            self._page_info[pid].parent_hash = None
-            self._free_pages.append(pid)
+                self._cache[page_hash] = page_id
+
+    def write(
+        self,
+        sequences: list[Sequence],
+        layer_id: int,
+        kv: tuple[Tensor, Tensor],
+    ):
+        page_ids = torch.tensor(
+            [self._page_table[sequence.s_id][-1] for sequence in sequences],
+            device=self.device,
+            dtype=torch.long,
+        )
+        offsets = torch.tensor(
+            data=[
+                (len(sequence) - sequence.tokens_evicted - 1) % self.page_size
+                for sequence in sequences
+            ],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._page_pool.write(
+            page_ids=page_ids,
+            layer_id=layer_id,
+            offsets=offsets,
+            kv=kv,
+        )
+
+        ## cache
+        if layer_id != self.num_layers - 1:
+            return
+
+        for sequence in sequences:
+            # check if last page of the sequence has been filled
+            if (len(sequence) - sequence.tokens_evicted) % self.page_size != 0:
+                continue
+            page_ids = self._page_table[sequence.s_id]
+            page_id = page_ids[-1]
+
+            parent_hash = None
+            if len(page_ids) > 1:
+                parent_hash = self._page_info[page_ids[-2]].page_hash
+
+            page_tokens = sequence.tokens[-self.page_size :]
+            page_hash = self._stable_hash((parent_hash, page_tokens))
+            self._page_info[page_id].parent_hash = parent_hash
+            self._page_info[page_id].page_hash = page_hash
+
+            self._cache[page_hash] = page_id
+
+    def read_page(
+        self,
+        page_table: Tensor,
+        layer_id: int,
+        page_idx: int,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        page_ids = page_table[:, page_idx]
+        valid = page_ids != -1
+        safe_page_ids = page_ids.masked_fill(~valid, 0)
+
+        k, v = self._page_pool.read(page_ids=safe_page_ids, layer_id=layer_id)
+        valid = valid[:, None, None, None]
+        k = k * valid
+        v = v * valid
+        return k, v, valid
+
+    def build_page_table(self, sequences: list[Sequence]) -> Tensor:
+        page_ids: list[list[int]] = [
+            self._page_table.get(sequence.s_id, []) for sequence in sequences
+        ]
+        max_pages = max(len(_) for _ in page_ids)
+        page_table = torch.full(size=(len(sequences), max_pages), fill_value=-1, dtype=torch.long)
+        for i, _page_ids in enumerate(page_ids):
+            page_table[i, : len(_page_ids)] = torch.tensor(_page_ids, dtype=torch.long)
+
+        return page_table.to(device=self.device)
 
     def get_num_pages(self, sequence: Sequence) -> int:
         return len(self._page_table.get(sequence.s_id, []))
