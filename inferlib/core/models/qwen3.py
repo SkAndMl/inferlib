@@ -188,13 +188,11 @@ class Qwen3Attention(nn.Module):
         max_pages = page_table.shape[-1]
 
         for i in range(max_pages):
-            valid_indices = torch.clamp(
-                cached_lens - i * page_manager.page_size, 0, page_manager.page_size
-            )
+            valid_indices = torch.clamp(cached_lens - i * page_manager.page_size, 0, page_manager.page_size)
             token_mask = indices < valid_indices.unsqueeze(1)
             token_mask = token_mask[:, None, None, :]
 
-            k_i, v_i, page_mask = page_manager.read_page(
+            k_i, v_i, page_mask = page_manager.read_from_page_table(
                 page_table=page_table,
                 layer_id=self._layer_id,
                 page_idx=i,
@@ -202,12 +200,8 @@ class Qwen3Attention(nn.Module):
             mask = token_mask & page_mask
 
             kf, vf = k_i.to(torch.float32), v_i.to(torch.float32)
-            kf = kf.repeat_interleave(
-                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
-            )
-            vf = vf.repeat_interleave(
-                self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1
-            )
+            kf = kf.repeat_interleave(self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1)
+            vf = vf.repeat_interleave(self.cfg.num_attention_heads // self.cfg.num_key_value_heads, 1)
             running_max, running_denom, y = self._online_step(
                 qf=qf,
                 kf=kf,
@@ -262,7 +256,27 @@ class Qwen3Attention(nn.Module):
         k = apply_rot_emb(k, cos=self.cos, sin=self.sin, start_positions=start_positions)
 
         if prefill and self.cfg.use_cache:
-            page_manager.prefill(sequences=sequences, layer_id=self._layer_id, kv=(k, v))
+            n_cached_pages = sequences[0].prefix_cached_tokens // page_manager.page_size
+            page_manager.prefill(
+                sequences=sequences,
+                layer_id=self._layer_id,
+                kv=(k, v),
+                cached_pages_offset=n_cached_pages,
+            )
+
+            if n_cached_pages > 0:
+                page_table = page_manager.build_page_table(sequences)
+                cached_k_chunks: list[Tensor] = []
+                cached_v_chunks: list[Tensor] = []
+                for i in range(n_cached_pages):
+                    k_i, v_i, _ = page_manager.read_from_page_table(page_table, self._layer_id, i)
+                    cached_k_chunks.append(k_i)
+                    cached_v_chunks.append(v_i)
+
+                cached_k = torch.cat(cached_k_chunks, dim=2)  # [B, kv_heads, prefix_len, dim]
+                cached_v = torch.cat(cached_v_chunks, dim=2)
+                k = torch.cat([cached_k, k], dim=2)  # [B, kv_heads, prefix_len + T_new, dim]
+                v = torch.cat([cached_v, v], dim=2)
 
         if self.cfg.use_cache and not prefill:
             y = self._online_attention(
@@ -284,15 +298,14 @@ class Qwen3Attention(nn.Module):
                     device=x.device,
                     dtype=torch.bool,
                 ).tril(0)
-            else:
-                assert mask.shape == (B, T, T)
 
+            # mask: [B, T_q, T_kv]  where T_kv >= T_q when prefix cache is active
             attn: Tensor = q @ k.transpose(2, 3) / self.cfg.head_dim**0.5
             attn.masked_fill_(~mask[:, None, ...], value=float("-inf"))
             attn = F.softmax(attn.float(), dim=-1).to(q.dtype).nan_to_num(nan=0.0)
             attn = F.dropout(attn, p=self.cfg.attention_dropout, training=self.training)
 
-            y: Tensor = attn @ v  # B, N_Q_HEADS, T, HEAD_DIM
+            y: Tensor = attn @ v  # B, N_Q_HEADS, T_q, HEAD_DIM
 
         _seq = 1 if self.cfg.use_cache and not prefill else T
         y = y.transpose(1, 2).contiguous().view(B, _seq, -1)
@@ -305,9 +318,7 @@ class Qwen3MLP(nn.Module):
         self.gate_proj = nn.Linear(
             in_features=cfg.hidden_size, out_features=cfg.intermediate_size, bias=False
         )
-        self.up_proj = nn.Linear(
-            in_features=cfg.hidden_size, out_features=cfg.intermediate_size, bias=False
-        )
+        self.up_proj = nn.Linear(in_features=cfg.hidden_size, out_features=cfg.intermediate_size, bias=False)
         self.down_proj = nn.Linear(
             in_features=cfg.intermediate_size, out_features=cfg.hidden_size, bias=False
         )
@@ -351,13 +362,9 @@ class Qwen3(nn.Module, Model):
         super().__init__()
         self.cfg = cfg
         self.embed_tokens = nn.Embedding(cfg.vocab_size, cfg.hidden_size)
-        self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(cfg, i) for i in range(cfg.num_hidden_layers)]
-        )
+        self.layers = nn.ModuleList([Qwen3DecoderLayer(cfg, i) for i in range(cfg.num_hidden_layers)])
         self.norm = Qwen3RMSNorm(hidden_size=cfg.hidden_size, rms_norm_eps=cfg.rms_norm_eps)
-        self.lm_head = nn.Linear(
-            in_features=cfg.hidden_size, out_features=cfg.vocab_size, bias=False
-        )
+        self.lm_head = nn.Linear(in_features=cfg.hidden_size, out_features=cfg.vocab_size, bias=False)
         if cfg.tie_word_embeddings:
             self.lm_head.weight = self.embed_tokens.weight
 
@@ -406,41 +413,61 @@ class Qwen3(nn.Module, Model):
     ) -> list[int]:
         B = len(sequences)
         device = self.embed_tokens.weight.device
-        max_len = max(len(sequence) for sequence in sequences)
+
+        # only feed uncached suffix through the model
+        # all sequences in the batch share the same prefix_cached_tokens
+        # (enforced by the scheduler).
+        prefix_len = sequences[0].prefix_cached_tokens  # tokens, not pages
+
+        # build batch containing only uncached tokens
+        max_new_len = max(len(seq) - prefix_len for seq in sequences)
         batch = torch.full(
-            size=(B, max_len),
+            size=(B, max_new_len),
             fill_value=pad_token,
             device=device,
             dtype=torch.long,
         )
-        mask = torch.full(
-            size=(B, max_len, max_len),
-            fill_value=1,
-            device=device,
-            dtype=torch.bool,
-        ).tril(0)
-        seq_lens = torch.zeros(size=(len(sequences),), device=device, dtype=torch.long)
-        for i, sequence in enumerate(sequences):
-            seq_lens[i] = len(sequence)
-            batch[i, : len(sequence)] = torch.tensor(sequence.prompt_tokens, device=device)
-            mask[i, len(sequence) :, len(sequence) :] = 0
+        seq_new_lens = torch.zeros(B, device=device, dtype=torch.long)
+        for i, seq in enumerate(sequences):
+            new_tokens = seq.prompt_tokens[prefix_len:]
+            seq_new_lens[i] = len(new_tokens)
+            batch[i, : len(new_tokens)] = torch.tensor(new_tokens, device=device)
+
+        # Build mask: [B, T_new_max, prefix_len + T_new_max]
+        # padding rows (beyond each sequence's actual new_len) are all-False
+        # so that padding tokens don't attend to anything and nobody attends
+        # to padding key positions.
+        T_kv = prefix_len + max_new_len
+        mask = torch.zeros(B, max_new_len, T_kv, device=device, dtype=torch.bool)
+        for i in range(B):
+            n = int(seq_new_lens[i].item())
+            # attend to all cached positions
+            mask[i, :n, :prefix_len] = True
+            # causal over uncached positions
+            mask[i, :n, prefix_len : prefix_len + n] = torch.ones(n, n, device=device, dtype=torch.bool).tril(
+                0
+            )
+
+        # rope positions start at prefix_len so that the uncached suffix
+        # gets the correct absolute position embeddings.
+        start_positions = torch.full((B,), prefix_len, device=device, dtype=torch.long)
 
         logits: Tensor = self(
             batch,
             sequences=sequences,
             page_manager=page_manager,
             prefill=True,
-            start_positions=None,
+            start_positions=start_positions,
             mask=mask,
-        )  # bsz, max_len, embed_dim
+        )  # [B, max_new_len, vocab]
 
-        temperatures = torch.tensor([(seq.temperature) for seq in sequences], device=device)
-
+        # Sample from the last valid position per sequence
+        temperatures = torch.tensor([seq.temperature for seq in sequences], device=device)
         row_idx = torch.arange(B, device=device)
-        last_idx = seq_lens - 1
-        last_token_logits = logits[row_idx, last_idx, :]  # bsz, vocab
+        last_idx = seq_new_lens - 1
+        last_token_logits = logits[row_idx, last_idx, :]  # [B, vocab]
         next_token_probs = F.softmax(last_token_logits / temperatures[:, None], dim=-1)
-        sampled_idx = torch.multinomial(next_token_probs, num_samples=1)  # bsz, 1
+        sampled_idx = torch.multinomial(next_token_probs, num_samples=1)  # [B, 1]
         return sampled_idx.squeeze(1).tolist()
 
     @torch.inference_mode()
@@ -458,8 +485,4 @@ class Qwen3(nn.Module, Model):
             start_positions=start_positions,
         )
         next_tokens = logits.argmax(dim=-1)
-        return (
-            [next_tokens.squeeze().item()]
-            if len(sequences) == 1
-            else next_tokens.squeeze().tolist()
-        )
+        return [next_tokens.squeeze().item()] if len(sequences) == 1 else next_tokens.squeeze().tolist()
