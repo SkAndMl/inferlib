@@ -71,6 +71,13 @@ class Page:
     refcount: int = 0
 
 
+@dataclass(frozen=True)
+class _PrefillPlan:
+    cached_page_ids: list[int]
+    fresh_pages_needed: int
+    prefix_cached_tokens: int
+
+
 @dataclass
 class PageManager:
     num_pages: int
@@ -93,13 +100,11 @@ class PageManager:
             device=self.device,
         )
         self._page_table: dict[int, list[int]] = {}
-        self._reserved_pages: dict[int, list[int]] = {}
 
         self._free_pages = deque(range(self.num_pages))
         self._page_info: list[Page] = [Page(page_id=i) for i in range(self.num_pages)]
 
         self._cache: dict[str, int] = {}  # hash -> page_id
-        self._cache_reserved: dict[int, list[int]] = {}
 
         self._state_lock = threading.Lock()
 
@@ -120,12 +125,8 @@ class PageManager:
 
         return matched_page_ids
 
-    def reserve_prefill(self, sequence: Sequence, n: int) -> bool:
+    def plan_prefill(self, sequence: Sequence, n: int) -> Optional[_PrefillPlan]:
         with self._state_lock:
-            s_id = sequence.s_id
-            assert s_id not in self._reserved_pages and s_id not in self._cache_reserved, (
-                f"Sequence {s_id} already has reserved pages or cache reserved"
-            )
             matched_prefix = self._matched_prefix(sequence)
             fresh_pages_needed = n - len(matched_prefix)
             if fresh_pages_needed == 0:
@@ -134,102 +135,53 @@ class PageManager:
                 fresh_pages_needed = 1
                 matched_prefix = matched_prefix[:-1]
 
-            # prefix caching: tell the sequence how many tokens are pre-cached
-            sequence.prefix_cached_tokens = len(matched_prefix) * self.page_size
-
             if len(self._free_pages) < fresh_pages_needed:
-                return False
+                return None
 
-            self._cache_reserved[s_id] = matched_prefix[:]
-            for page_id in self._cache_reserved[s_id]:
-                # update refcount for reserved cached pages,
-                # so that b/w reserve and commit if a page's refcount becomes 0
-                # it is not removed from the cache
-                self._page_info[page_id].refcount += 1
+            return _PrefillPlan(
+                cached_page_ids=matched_prefix[:],
+                fresh_pages_needed=fresh_pages_needed,
+                prefix_cached_tokens=len(matched_prefix) * self.page_size,
+            )
 
-            reserved_page_ids = [self._free_pages.popleft() for _ in range(fresh_pages_needed)]
-            self._reserved_pages[s_id] = reserved_page_ids
-
-        return True
-
-    def commit_prefill(self, sequence: Sequence):
+    def allocate_prefill(self, sequence: Sequence, plan: _PrefillPlan) -> None:
         with self._state_lock:
-            s_id = sequence.s_id
-            assert s_id not in self._page_table, f"Prefill sequence {s_id} already has committed pages"
-            self._page_table[s_id] = []
-            reserved_page_ids: list[int] = self._reserved_pages.pop(s_id, [])
-            for page_id in reserved_page_ids:
-                self._page_info[page_id].refcount += 1
+            assert sequence.s_id not in self._page_table, (
+                f"Prefill sequence {sequence.s_id} already has committed pages"
+            )
+            assert len(self._free_pages) >= plan.fresh_pages_needed
 
-            self._page_table[s_id] = self._cache_reserved.pop(s_id, []) + reserved_page_ids[:]
+            fresh_page_ids = [self._free_pages.popleft() for _ in range(plan.fresh_pages_needed)]
+            self._retain_pages(plan.cached_page_ids)
+            self._retain_pages(fresh_page_ids)
 
-    def reserve_decode(self, sequence: Sequence, n: int) -> bool:
+            self._page_table[sequence.s_id] = plan.cached_page_ids + fresh_page_ids
+            sequence.prefix_cached_tokens = plan.prefix_cached_tokens
+
+            if __debug__:
+                self._check_invariants()
+
+    def append_decode_pages(self, sequence: Sequence, n: int) -> bool:
         with self._state_lock:
-            s_id = sequence.s_id
-            assert s_id not in self._reserved_pages, f"Sequence {s_id} already has reserved pages"
+            if n == 0:
+                return True
             if len(self._free_pages) < n:
                 return False
+
             page_ids = [self._free_pages.popleft() for _ in range(n)]
-            self._reserved_pages[s_id] = page_ids
+            self._retain_pages(page_ids)
+            self._page_table[sequence.s_id].extend(page_ids)
 
             if __debug__:
                 self._check_invariants()
 
             return True
 
-    def commit_decode(self, sequence: Sequence) -> None:
-        with self._state_lock:
-            s_id = sequence.s_id
-            page_ids: list[int] = self._reserved_pages.pop(s_id)
-            for page_id in page_ids:
-                self._page_info[page_id].refcount += 1
-                self._page_table[s_id].append(page_id)
-
-            if __debug__:
-                self._check_invariants()
-
-    def abort(self, sequence: Sequence) -> None:
-        with self._state_lock:
-            s_id = sequence.s_id
-            self._free_pages.extend(self._reserved_pages.pop(s_id))
-
-            if s_id in self._cache_reserved:
-                # cached prefixes are constructed from left to right
-                # so pop them from right to left
-                for page_id in reversed(self._cache_reserved[s_id]):
-                    page_info = self._page_info[page_id]
-                    page_info.refcount -= 1
-                    if page_info.refcount == 0:
-                        if page_info.page_hash and page_info.page_id in self._cache:
-                            del self._cache[page_info.page_hash]
-                            sequence.cached_pages -= 1
-
-                        page_info.page_hash = None
-                        page_info.parent_hash = None
-                        self._free_pages.append(page_id)
-
-                del self._cache_reserved[s_id]
-
-            # reset prefix_cached_tokens; will be re-set on next reserve_prefill
-            sequence.prefix_cached_tokens = 0
-
-            if __debug__:
-                self._check_invariants()
-
     def free(self, sequence: Sequence):
         with self._state_lock:
             page_ids: list[int] = self._page_table.pop(sequence.s_id)
             for page_id in page_ids:
-                info = self._page_info[page_id]
-                info.refcount -= 1
-                assert info.refcount >= 0
-                if info.refcount == 0:
-                    if info.page_hash and info.page_hash in self._cache:
-                        del self._cache[info.page_hash]
-                        sequence.cached_pages -= 1
-                    info.page_hash = None
-                    info.parent_hash = None
-                    self._free_pages.append(page_id)
+                self._release_page(page_id, sequence)
 
             if __debug__:
                 self._check_invariants()
@@ -237,15 +189,10 @@ class PageManager:
     def evict(self, sequence: Sequence):
         with self._state_lock:
             pid = self._page_table[sequence.s_id].pop(0)  # TODO: O(n) op, optimize later
-            page_info = self._page_info[pid]
-            page_info.refcount -= 1
-            if self._page_info[pid].refcount == 0:
-                if page_info.page_hash and page_info.page_hash in self._cache:
-                    del self._cache[page_info.page_hash]
-                    sequence.cached_pages -= 1
-                page_info.page_hash = None
-                page_info.parent_hash = None
-                self._free_pages.append(pid)
+            self._release_page(pid, sequence)
+
+            if __debug__:
+                self._check_invariants()
 
     def prefill(
         self,
@@ -385,6 +332,11 @@ class PageManager:
     def get_cached_page_ids(self, sequence: Sequence) -> list[int]:
         return self._page_table.get(sequence.s_id, [])[: sequence.cached_pages]
 
+    @property
+    def num_free_pages(self) -> int:
+        with self._state_lock:
+            return len(self._free_pages)
+
     def _stable_hash(self, parts: tuple[object, ...]) -> str:
         h = hashlib.sha256()
         for part in parts:
@@ -392,25 +344,40 @@ class PageManager:
             h.update(b"|")
         return h.hexdigest()
 
+    def _retain_pages(self, page_ids: list[int]) -> None:
+        for page_id in page_ids:
+            self._page_info[page_id].refcount += 1
+
+    def _release_page(self, page_id: int, sequence: Sequence) -> None:
+        info = self._page_info[page_id]
+        info.refcount -= 1
+        assert info.refcount >= 0
+        if info.refcount > 0:
+            return
+
+        if info.page_hash is not None:
+            if self._cache.get(info.page_hash) == page_id:
+                del self._cache[info.page_hash]
+            sequence.cached_pages -= 1
+            assert sequence.cached_pages >= 0
+        info.page_hash = None
+        info.parent_hash = None
+        self._free_pages.append(page_id)
+
     def _check_invariants(self):
         allocated = [p for s_id in self._page_table for p in self._page_table[s_id]]
-        reserved = [p for s_id in self._reserved_pages for p in self._reserved_pages[s_id]]
 
         free_set = set(self._free_pages)
         allocated_set = set(allocated)
-        reserved_set = set(reserved)
 
         allocated_counts = Counter(allocated)
 
         assert len(free_set) == len(self._free_pages), "Duplicate page_id in _free_pages"
-        assert len(reserved_set) == len(reserved), "Duplicate page_id in _reserved_pages"
 
-        assert free_set.isdisjoint(reserved_set), "Page appears in both free and reserved set"
         assert free_set.isdisjoint(allocated_set), "Page appears in both free and allocated set"
-        assert reserved_set.isdisjoint(allocated_set), "Page appears in both reserved and allocated set"
 
         all_pages = set(range(self.num_pages))
-        union = free_set | reserved_set | allocated_set
+        union = free_set | allocated_set
         assert union.issubset(all_pages), "Invalid page id found"
         assert len(union) == self.num_pages, f"Leak/dup: accounted={len(union)}, expected={self.num_pages}"
 
@@ -418,9 +385,6 @@ class PageManager:
             expected = allocated_counts.get(p, 0)
             actual = self._page_info[p].refcount
             assert expected == actual, f"refcount mismatch page={p}: {actual} != {expected}"
-
-        for p in reserved_set:
-            assert self._page_info[p].refcount == 0, "Reserved page has nonzero refcount"
 
 
 __all__ = ["PageManager"]
