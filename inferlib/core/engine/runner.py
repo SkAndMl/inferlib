@@ -14,9 +14,7 @@ class Runner:
         if sequences[0].last_token_id == -1:
             # prefill
             assert all(seq.last_token_id == -1 for seq in sequences)
-            next_tokens = self.llm.prefill(
-                sequences=sequences, page_manager=self.page_manager
-            )
+            next_tokens = self.llm.prefill(sequences=sequences, page_manager=self.page_manager)
             for seq, next_token in zip(sequences, next_tokens):
                 seq.completion_tokens.append(next_token)
                 seq.last_token_id = next_token

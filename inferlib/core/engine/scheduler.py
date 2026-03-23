@@ -3,8 +3,8 @@ import math
 from collections import deque
 from typing import Literal
 
-from inferlib.core.engine.page import PageManager
-from inferlib.core.engine.sequence import Sequence, SequenceState
+from inferlib.core.engine.page import PageManager, _PrefillPlan
+from inferlib.core.engine.sequence import Sequence
 from inferlib.core.log import logger
 
 
@@ -95,12 +95,11 @@ class Scheduler:
         self._prefill_bucket = _Bucket(self._page_size)
         self._decode_bucket: deque[Sequence] = deque()
 
-        self._active_sequences = set()
+        self._schedule_limit = min(batch_size, max_active_sequences)
         self._prefill_before_decode: int = 0
         self._max_prefill_before_decode: int = 2
 
     def add_request(self, sequence: Sequence) -> bool:
-        sequence.state = SequenceState.WAITING
         # reject prompts that exceed the max number of pages for a sequence
         if self._calculate_pages_needed(sequence) > self.max_pages_per_sequence:
             return False
@@ -127,53 +126,61 @@ class Scheduler:
 
     async def _get_prefill_batch(self) -> list[Sequence]:
         batch: list[Sequence] = []
+        planned: list[tuple[Sequence, _PrefillPlan]] = []
         bucket_idx = self._prefill_bucket.max_freq_bucket
         if bucket_idx is None:
             return batch
 
-        while len(batch) < self.batch_size:
-            # break if # active sequences == max active sequences
-            if len(self._active_sequences) >= self.max_active_sequences:
-                break
+        # prefix caching: all sequences in a prefill batch must share
+        # the same prefix_cached_tokens so that the model can build a
+        # single [T_new, prefix_len + T_new] mask and batch the work.
+        target_prefix: int | None = None
+        remaining_free_pages = self.page_manager.num_free_pages
 
+        while len(planned) < self._schedule_limit:
             sequence = self._prefill_bucket.get(bucket_idx)
             if sequence is None:
                 break
 
             pages_needed = self._calculate_pages_needed(sequence=sequence)
-            if not self.page_manager.reserve(sequence.s_id, pages_needed):
+            plan = self.page_manager.plan_prefill(sequence, pages_needed)
+            if plan is None:
                 self._prefill_bucket.add(sequences=sequence, append="left")
                 break
 
-            self.page_manager.commit(sequence.s_id)
-            sequence.state = SequenceState.RUNNING
-            self._active_sequences.add(sequence.s_id)
+            if target_prefix is None:
+                target_prefix = plan.prefix_cached_tokens
+            elif plan.prefix_cached_tokens != target_prefix:
+                # different cache hit length — can't batch together.
+                self._prefill_bucket.add(sequences=sequence, append="left")
+                break
+
+            if plan.fresh_pages_needed > remaining_free_pages:
+                self._prefill_bucket.add(sequences=sequence, append="left")
+                break
+
+            planned.append((sequence, plan))
+            remaining_free_pages -= plan.fresh_pages_needed
+
+        for sequence, plan in planned:
+            self.page_manager.allocate_prefill(sequence, plan)
             batch.append(sequence)
 
         return batch
 
     async def _get_decode_batch(self) -> list[Sequence]:
         batch = []
-        while len(batch) < self.batch_size and self._decode_bucket:
-            if len(self._active_sequences) >= self.max_active_sequences:
-                break
-
+        while len(batch) < self._schedule_limit and self._decode_bucket:
             sequence = self._decode_bucket.popleft()
             pages_needed = self._calculate_pages_needed(sequence=sequence)
-            if (
-                self.page_manager.get_num_pages(sequence.s_id) == self.max_pages_per_sequence
-                and pages_needed
-            ):
-                self.page_manager.evict(sequence.s_id)
+            if self.page_manager.get_num_pages(sequence) == self.max_pages_per_sequence and pages_needed:
+                self.page_manager.evict(sequence)
                 sequence.tokens_evicted += self._page_size
 
-            if not self.page_manager.reserve(sequence.s_id, pages_needed):
+            if not self.page_manager.append_decode_pages(sequence, pages_needed):
                 self._decode_bucket.append(sequence)
                 break
 
-            self.page_manager.commit(sequence.s_id)
-            sequence.state = SequenceState.RUNNING
-            self._active_sequences.add(sequence.s_id)
             batch.append(sequence)
 
         return batch
@@ -181,14 +188,11 @@ class Scheduler:
     def update(self, sequences: list[Sequence]):
         assert all(sequence.last_token_id != -1 for sequence in sequences)
         for sequence in sequences:
-            self._active_sequences.remove(sequence.s_id)
             if sequence.is_finished:
-                sequence.state = SequenceState.FINISHED
-                self.page_manager.free(sequence.s_id)
+                self.page_manager.free(sequence)
                 logger.info(f"{sequence.s_id} finished...")
                 continue
 
-            sequence.state = SequenceState.WAITING
             self._decode_bucket.append(sequence)
 
     def _calculate_pages_needed(self, sequence: Sequence) -> int:
