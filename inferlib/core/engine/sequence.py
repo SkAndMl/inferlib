@@ -7,11 +7,12 @@ class Sequence:
     s_id: str
     prompt_tokens: list[int]
     completion_tokens: list[int]
-    eos_token_id: int
+    eos_token_id: int | None
     last_text: str = ""
     last_token_id: int = -1
     temperature: float = 0.1
     max_tokens: int = 200
+    max_total_tokens: int | None = None
     tokens_evicted: int = 0
     cached_pages: int = 0
 
@@ -26,13 +27,18 @@ class Sequence:
 
     @property
     def is_finished(self) -> bool:
-        return self.last_token_id == self.eos_token_id or len(self.completion_tokens) == self.max_tokens
+        eos_reached = self.eos_token_id is not None and self.last_token_id == self.eos_token_id
+        max_completion_reached = len(self.completion_tokens) == self.max_tokens
+        max_total_reached = self.max_total_tokens is not None and len(self) >= self.max_total_tokens
+        return eos_reached or max_completion_reached or max_total_reached
 
     @property
     def finish_reason(self) -> Literal["stop", "length"] | None:
-        if self.last_token_id == self.eos_token_id:
+        if self.eos_token_id is not None and self.last_token_id == self.eos_token_id:
             return "stop"
         if len(self.completion_tokens) == self.max_tokens:
+            return "length"
+        if self.max_total_tokens is not None and len(self) >= self.max_total_tokens:
             return "length"
         return None
 
