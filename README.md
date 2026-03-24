@@ -1,103 +1,145 @@
 # inferlib
 
-A CPU-first serving engine for running multiple open-weights models locally.
+CPU-first local inference for Qwen3 models, with a small Python API and an OpenAI-compatible FastAPI server.
 
-## What is this?
+## What inferlib is
 
-inferlib is an LLM inference engine built from scratch with a focus on running open-weights models on CPU hardware. It implements a paged KV cache, a batch scheduler, and an OpenAI-compatible HTTP API — so you can point existing OpenAI clients at it with minimal changes.
+inferlib is a local serving engine built around:
 
-## Quick Start (Docker)
+- a paged KV cache
+- a batch scheduler for prefill and decode work
+- a single-process FastAPI server with chat persistence
+- a small Python API for direct generation and benchmarking
 
-The easiest way to run inferlib. No Python setup required.
+Current production scope is intentionally narrow:
 
-```bash
-docker run -p 8000:8000 skandml/inferlib:0.2.3
-```
+- Qwen3 only
+- one loaded model per process
+- CPU-first execution
+- no distributed serving
 
-To use a different model:
+## Install
 
-```bash
-docker run -p 8000:8000 \
-  -e INFERLIB_MODEL_CLASS=Qwen/Qwen3-1.7B \
-  skandml/inferlib:0.2.3
-```
+### From source
 
-The `-v` flag persists your chat history between runs. Without it, the database resets every time the container stops. To persist data:
-
-```bash
-docker run -p 8000:8000 -v ~/.inferlib:/root/.inferlib skandml/inferlib:0.2.3
-```
-
-On first start, inferlib downloads the model weights from HuggingFace. This takes a few minutes depending on your connection. Subsequent starts are instant.
-
-Open `http://localhost:8000` in your browser.
-
-## Quick Start (from source)
-
-Requires Python 3.13+, [uv](https://github.com/astral-sh/uv), and `npm`.
+Requires Python 3.13+, `uv`, Node/npm for the optional UI build, and Docker only if you want container packaging.
 
 ```bash
 git clone https://github.com/skandml/inferlib
 cd inferlib
-uv sync
+uv sync --group dev
+inferlib build-frontend
 inferlib serve
 ```
 
-`inferlib serve` automatically builds the frontend bundle on first run if needed, then serves the UI at `http://localhost:8000`.
-
-With a specific model:
+If you only want the HTTP API and not the web UI:
 
 ```bash
-inferlib serve --model-class Qwen/Qwen3-1.7B
+inferlib serve --no-ui
 ```
 
-## Frontend Development
-
-The production UI is served by FastAPI from a compiled React/Vite bundle.
-
-For hot-reload frontend work (optional):
+### Docker
 
 ```bash
-# terminal 1
-inferlib serve
-
-# terminal 2
-cd frontend
-npm install
-npm run dev
+docker build -t inferlib .
+docker run -p 8000:8000 inferlib
 ```
 
-Vite serves the React app on `http://localhost:5173` and proxies `/v1/*` and `/health` to the FastAPI server on `http://localhost:8000`.
+To persist chat history:
 
-## Usage
-
-### CLI
-
-```
-inferlib serve [OPTIONS]
-
-Options:
-  --host TEXT         Host to bind to (default: 0.0.0.0)
-  --port INT          Port to listen on (default: 8000)
-  --model-class TEXT  Model to load (default: Qwen/Qwen3-0.6B)
+```bash
+docker run -p 8000:8000 -v ~/.inferlib:/root/.inferlib inferlib
 ```
 
-### API Endpoints
+## Python API
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/v1/chat/completions` | Generate a response. Supports streaming via SSE. |
-| `GET` | `/v1/models` | List loaded models. |
-| `GET` | `/v1/chats` | List saved chat sessions. |
-| `GET` | `/v1/chats/{chat_id}/messages` | Get messages for a chat. |
-| `POST` | `/v1/chats/{chat_id}/messages` | Save a message to a chat. |
-| `PATCH` | `/v1/chats/{chat_id}` | Update chat title. |
-| `DELETE` | `/v1/chats/{chat_id}` | Delete a chat. |
-| `GET` | `/health` | Health check. |
+```python
+from inferlib import LLM, SamplingParams
 
-### Chat Completions
+llm = LLM("Qwen/Qwen3-0.6B", max_model_len=4096)
+outputs = llm.generate(
+    ["Benchmark: hello"],
+    SamplingParams(temperature=0.6, max_tokens=64),
+)
+print(outputs[0].text)
+llm.close()
+```
 
-inferlib implements the OpenAI chat completions API. You can use `curl`:
+Raw token IDs are also supported:
+
+```python
+from inferlib import LLM, SamplingParams
+
+llm = LLM("~/huggingface/Qwen3-0.6B/", max_model_len=4096)
+outputs = llm.generate(
+    [[1, 2, 3, 4]],
+    [SamplingParams(ignore_eos=True, max_tokens=128)],
+)
+llm.close()
+```
+
+Public Python surface:
+
+- `LLM`
+- `SamplingParams`
+- `GenerationOutput`
+
+## CLI
+
+### `inferlib serve`
+
+```bash
+inferlib serve \
+  --model-class Qwen/Qwen3-0.6B \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --db-path ~/.inferlib/chats.db \
+  --page-size 32 \
+  --batch-size 4 \
+  --max-active-sequences 8 \
+  --memory-limit-bytes 4294967296 \
+  --log-level INFO \
+  --log-format text
+```
+
+Available flags:
+
+- `--model-class`
+- `--host`
+- `--port`
+- `--db-path`
+- `--page-size`
+- `--batch-size`
+- `--max-active-sequences`
+- `--memory-limit-bytes`
+- `--log-level`
+- `--log-format text|json`
+- `--no-ui`
+
+### `inferlib build-frontend`
+
+Builds the React/Vite bundle explicitly. `serve` no longer installs dependencies or builds the frontend on demand.
+
+```bash
+inferlib build-frontend
+```
+
+## HTTP API
+
+### Health and models
+
+- `GET /health`
+- `GET /v1/models`
+
+`/health` returns:
+
+```json
+{"status":"ok","model":"Qwen/Qwen3-0.6B"}
+```
+
+`/v1/models` returns only the model loaded in the current process.
+
+### Chat completions
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -105,105 +147,113 @@ curl http://localhost:8000/v1/chat/completions \
   -d '{
     "model": "Qwen/Qwen3-0.6B",
     "messages": [{"role": "user", "content": "hello"}],
-    "stream": false
+    "stream": false,
+    "max_tokens": 128,
+    "temperature": 0.6
   }'
 ```
 
-Or with streaming:
+Streaming uses SSE with OpenAI-style chunk objects and a final `data: [DONE]`.
 
-```bash
-curl http://localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Qwen/Qwen3-0.6B",
-    "messages": [{"role": "user", "content": "hello"}],
-    "stream": true
-  }'
+### Error envelope
+
+All 4xx and 5xx responses use:
+
+```json
+{
+  "error": {
+    "type": "invalid_request_error",
+    "code": "model_not_loaded",
+    "message": "Requested model ... is not loaded ..."
+  }
+}
 ```
 
-### Request Parameters
+### Chat persistence routes
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `model` | string | required | Model identifier |
-| `messages` | array | required | Conversation history |
-| `stream` | bool | `true` | Stream tokens via SSE |
-| `temperature` | float | `1.0` | Sampling temperature |
-| `max_tokens` | int | `4096` | Maximum tokens to generate |
-| `thinking` | bool | `false` | Enable Qwen3 thinking mode |
-
-## Supported Models
-
-| Model | Size |
-|-------|------|
-| `Qwen/Qwen3-0.6B` | 0.6B parameters |
-| `Qwen/Qwen3-1.7B` | 1.7B parameters |
-
-## Architecture
-
-inferlib is built in layers:
-
-```
-inferlib/
-├── core/
-│   ├── engine/
-│   │   ├── engine.py      # worker loop, request lifecycle
-│   │   ├── scheduler.py   # batch scheduling, prefill/decode priority
-│   │   ├── runner.py      # prefill and decode execution
-│   │   ├── page.py        # paged KV cache
-│   │   └── sequence.py    # sequence state machine
-│   └── models/
-│       └── qwen3.py       # Qwen3 model implementation
-└── server/
-    ├── apis/
-    │   ├── chat.py        # /v1/chat/completions
-    │   └── ui_chats.py    # chat persistence endpoints
-    ├── app.py             # FastAPI app
-    ├── cli.py             # inferlib serve entrypoint
-    ├── db_client.py       # SQLite via aiosqlite
-    ├── models.py          # Pydantic request/response schemas
-    └── static/            # compiled React frontend bundle
-```
-
-```
-frontend/
-├── src/
-│   ├── components/        # chat UI building blocks
-│   ├── App.tsx            # app state and orchestration
-│   ├── api.ts             # browser API client
-│   └── markdown.ts        # markdown, math, and thinking parsing
-└── vite.config.ts         # frontend dev/build config
-```
-
-**Paged KV Cache** — attention key/value tensors are stored in fixed-size pages rather than contiguous buffers. This avoids memory fragmentation and allows multiple sequences to share the memory pool efficiently.
-
-**Scheduler** — sequences are grouped into buckets by page count. The scheduler prioritises prefill (to minimise time-to-first-token) while interleaving decode steps to keep active sequences progressing. Bucket selection uses a skip-count mechanism to prevent starvation of minority buckets.
-
-**Async engine** — the worker loop runs as an `asyncio` task. An `asyncio.Event` is used for wakeup signalling so the engine sleeps with zero CPU usage when idle, and wakes immediately when a new request arrives.
+- `GET /v1/chats`
+- `GET /v1/chats/{chat_id}`
+- `GET /v1/chats/{chat_id}/messages`
+- `POST /v1/chats/{chat_id}/messages`
+- `PATCH /v1/chats/{chat_id}`
+- `DELETE /v1/chats/{chat_id}`
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INFERLIB_MODEL_CLASS` | `Qwen/Qwen3-0.6B` | Model to load at startup |
-| `DB_PATH` | `~/.inferlib/chats.db` | Path to SQLite database |
+CLI flags override environment variables.
 
-## Roadmap
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `INFERLIB_MODEL_CLASS` | `Qwen/Qwen3-0.6B` | Loaded model id or local path |
+| `INFERLIB_HOST` | `0.0.0.0` | Server bind host |
+| `INFERLIB_PORT` | `8000` | Server port |
+| `INFERLIB_DB_PATH` | `~/.inferlib/chats.db` | SQLite path |
+| `INFERLIB_PAGE_SIZE` | `32` | KV page size |
+| `INFERLIB_BATCH_SIZE` | `4` | Scheduler batch size |
+| `INFERLIB_MAX_ACTIVE_SEQUENCES` | `8` | Active sequence limit |
+| `INFERLIB_MEMORY_LIMIT_BYTES` | `4294967296` | Engine memory budget |
+| `INFERLIB_LOG_LEVEL` | `INFO` | Python log level |
+| `INFERLIB_LOG_FORMAT` | `text` | `text` or `json` |
+| `INFERLIB_UI` | `true` | Set false to disable the UI |
 
-**v1.0.0**
-- Continuous batching
-- Prefix caching
-- ChatGPT-like UI improvements
+Legacy compatibility:
 
-**v1.5.0**
-- Tool calling
-- Web search
+- `DB_PATH` is still accepted as a fallback for one release.
 
-**v2.0.0**
-- Additional model support
+## Logging
 
-**v3.0.0**
-- Rust rewrite of the inference path
+inferlib now uses centralized structured logging for both inferlib and uvicorn logs.
+
+Log records include:
+
+- startup config
+- request id
+- prompt and completion token counts
+- duration and TTFT
+- tokens per second
+- scheduler batch mode and batch size
+- sequence completion and page pressure context
+
+Use JSON logs with:
+
+```bash
+inferlib serve --log-format json
+```
+
+## Benchmark
+
+`bench.py` benchmarks inferlib and optionally vLLM with synthetic token IDs, close to the nano-vllm workflow.
+
+```bash
+uv run python bench.py \
+  --backend both \
+  --model ~/huggingface/Qwen3-0.6B/ \
+  --num-seqs 256 \
+  --max-input-len 1024 \
+  --max-output-len 1024 \
+  --seed 0 \
+  --max-model-len 4096
+```
+
+If `vllm` is not installed, the script prints a skip message and still runs the inferlib benchmark.
+
+## Development
+
+Checks used by CI:
+
+```bash
+uv run ruff check .
+uv run pytest -q
+cd frontend && npm ci && npm run build
+docker build .
+```
+
+## Current limitations
+
+- Qwen3 is the only supported model family.
+- Only one model is loaded per process.
+- The Python API exposes a small, benchmark-oriented subset of vLLM-style ergonomics.
+- The benchmark is engine-level only; it does not measure end-to-end HTTP latency.
 
 ## License
 

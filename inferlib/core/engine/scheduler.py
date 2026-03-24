@@ -106,7 +106,13 @@ class Scheduler:
 
         self._prefill_bucket.add(sequence)
         self.request_event.set()
-        logger.debug(f"sequence: {sequence.s_id} added; # prefill: {len(self._prefill_bucket)}")
+        logger.debug(
+            "sequence enqueued",
+            extra={
+                "sequence_id": sequence.s_id,
+                "prefill_queue_size": len(self._prefill_bucket),
+            },
+        )
         return True
 
     async def schedule(self) -> list[Sequence]:
@@ -116,11 +122,33 @@ class Scheduler:
             # check if we are actually able to get prefill sequences, if not fall through to decode
             if len(batch) > 0:
                 self._prefill_before_decode += 1
+                logger.debug(
+                    "scheduled batch",
+                    extra={
+                        "mode": "prefill",
+                        "batch_size": len(batch),
+                        "free_pages": self.page_manager.num_free_pages,
+                        "prefill_queue_size": len(self._prefill_bucket),
+                        "decode_queue_size": len(self._decode_bucket),
+                    },
+                )
                 return batch
 
         if self._decode_bucket:
             self._prefill_before_decode = 0
-            return await self._get_decode_batch()
+            batch = await self._get_decode_batch()
+            if batch:
+                logger.debug(
+                    "scheduled batch",
+                    extra={
+                        "mode": "decode",
+                        "batch_size": len(batch),
+                        "free_pages": self.page_manager.num_free_pages,
+                        "prefill_queue_size": len(self._prefill_bucket),
+                        "decode_queue_size": len(self._decode_bucket),
+                    },
+                )
+            return batch
 
         return []
 
@@ -190,7 +218,13 @@ class Scheduler:
         for sequence in sequences:
             if sequence.is_finished:
                 self.page_manager.free(sequence)
-                logger.info(f"{sequence.s_id} finished...")
+                logger.info(
+                    "sequence finished",
+                    extra={
+                        "sequence_id": sequence.s_id,
+                        "finish_reason": sequence.finish_reason,
+                    },
+                )
                 continue
 
             self._decode_bucket.append(sequence)

@@ -10,7 +10,14 @@ class Runner:
         self.page_manager = page_manager
 
     def run(self, sequences: list[Sequence]):
-        logger.info(f"started running {len(sequences)} sequences")
+        mode = "prefill" if sequences[0].last_token_id == -1 else "decode"
+        logger.debug(
+            "running batch",
+            extra={
+                "mode": mode,
+                "batch_size": len(sequences),
+            },
+        )
         if sequences[0].last_token_id == -1:
             # prefill
             assert all(seq.last_token_id == -1 for seq in sequences)
@@ -18,7 +25,6 @@ class Runner:
             for seq, next_token in zip(sequences, next_tokens):
                 seq.completion_tokens.append(next_token)
                 seq.last_token_id = next_token
-            logger.info(f"finished prefilling {len(sequences)} sequences")
             return
 
         assert not any(seq.last_token_id == -1 for seq in sequences)
@@ -26,5 +32,3 @@ class Runner:
         for token, sequence in zip(tokens, sequences):
             sequence.completion_tokens.append(token)
             sequence.last_token_id = token
-
-        logger.info(f"finished running {len(sequences)} sequences")
