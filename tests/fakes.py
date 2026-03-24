@@ -63,38 +63,3 @@ class FakeServerEngine:
         queue.put_nowait(SimpleNamespace(text="hello", token_id=101, finish_reason=None, error=None))
         queue.put_nowait(SimpleNamespace(text=" world", token_id=102, finish_reason="length", error=None))
         return queue
-
-
-class FakePublicEngine:
-    instances: list["FakePublicEngine"] = []
-
-    def __init__(self, model_class: str, **kwargs) -> None:
-        self.model_class = model_class
-        self.kwargs = kwargs
-        self.tokenizer = FakeTokenizer()
-        self.received_prompts: list[list[int]] = []
-        self.received_sampling_params = []
-        FakePublicEngine.instances.append(self)
-
-    async def start(self) -> None:
-        return None
-
-    async def stop(self) -> None:
-        return None
-
-    async def generate(self, *, prompt_token_batches, sampling_params, use_tqdm: bool = False):
-        del use_tqdm
-        self.received_prompts = prompt_token_batches
-        self.received_sampling_params = sampling_params
-        from inferlib.types import GenerationOutput
-
-        return [
-            GenerationOutput(
-                text=f"out-{index}",
-                token_ids=[index],
-                finish_reason="length",
-                prompt_tokens=len(prompt),
-                completion_tokens=1,
-            )
-            for index, prompt in enumerate(prompt_token_batches)
-        ]
