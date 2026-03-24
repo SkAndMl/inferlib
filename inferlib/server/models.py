@@ -1,5 +1,8 @@
-from pydantic import BaseModel
+from __future__ import annotations
+
 from typing import Literal
+
+from pydantic import BaseModel, Field
 
 
 class Message(BaseModel):
@@ -9,10 +12,10 @@ class Message(BaseModel):
 
 class ChatCompletionRequest(BaseModel):
     model: str
-    messages: list[Message]
+    messages: list[Message] = Field(min_length=1)
     stream: bool = True
-    temperature: float = 1.0
-    max_tokens: int = 4096
+    temperature: float = Field(default=1.0, ge=0.0)
+    max_tokens: int = Field(default=4096, gt=0)
     thinking: bool = False
 
 
@@ -29,7 +32,7 @@ class UsageStats(BaseModel):
 
 
 class ChatCompletionResponse(BaseModel):
-    id: str  # e.g. f"chatcmpl-{uuid4()}"
+    id: str
     object: str = "chat.completion"
     created: int
     model: str
@@ -38,19 +41,101 @@ class ChatCompletionResponse(BaseModel):
 
 
 class Delta(BaseModel):
-    role: Literal["assistant"] | None = None  # only set on the first chunk
-    content: str | None = None  # the decoded token string; None on last chunk
+    role: Literal["assistant"] | None = None
+    content: str | None = None
 
 
 class StreamingChoice(BaseModel):
     index: int
     delta: Delta
-    finish_reason: Literal["stop", "length"] | None  # None on all chunks except last
+    finish_reason: Literal["stop", "length"] | None
 
 
 class ChatCompletionChunk(BaseModel):
-    id: str  # same id held for all chunks in a response
+    id: str
     object: str = "chat.completion.chunk"
     created: int
     model: str
     choices: list[StreamingChoice]
+
+
+class ErrorBody(BaseModel):
+    type: str
+    code: str
+    message: str
+
+
+class ErrorEnvelope(BaseModel):
+    error: ErrorBody
+
+
+class HealthResponse(BaseModel):
+    status: Literal["ok"] = "ok"
+    model: str
+
+
+class ModelInfo(BaseModel):
+    id: str
+    object: Literal["model"] = "model"
+    owned_by: Literal["inferlib"] = "inferlib"
+
+
+class ModelsResponse(BaseModel):
+    object: Literal["list"] = "list"
+    data: list[ModelInfo]
+
+
+class ChatRecord(BaseModel):
+    chat_id: str
+    title: str
+    created_at: int
+    updated_at: int
+    preview: str | None = None
+
+
+class MessageRecord(BaseModel):
+    message_id: str
+    chat_id: str
+    role: Literal["system", "user", "assistant"]
+    content: str
+    created_at: int
+
+
+class SaveMessageRequest(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+    message_id: str | None = None
+
+
+class SaveMessageResponse(BaseModel):
+    saved: Literal[True] = True
+    chat_id: str
+    message_id: str
+
+
+class UpdateChatTitleRequest(BaseModel):
+    title: str = Field(min_length=1)
+
+
+class UpdateChatTitleResponse(BaseModel):
+    updated: Literal[True] = True
+    chat_id: str
+    title: str
+
+
+class DeleteChatResponse(BaseModel):
+    deleted: Literal[True] = True
+    chat_id: str
+
+
+class ListChatsResponse(BaseModel):
+    chats: list[ChatRecord]
+
+
+class GetChatResponse(ChatRecord):
+    pass
+
+
+class GetChatMessagesResponse(BaseModel):
+    chat: ChatRecord
+    messages: list[MessageRecord]

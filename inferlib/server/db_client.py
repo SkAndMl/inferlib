@@ -1,5 +1,4 @@
 import aiosqlite
-import asyncio
 import time
 
 from contextlib import asynccontextmanager
@@ -183,26 +182,4 @@ class DBClient:
             return cursor.rowcount > 0
 
 
-_db_client: DBClient | None = None
-_db_lock = asyncio.Lock()
-
-
-async def get_db_client() -> DBClient:
-    from inferlib.server.config import DB_PATH
-
-    global _db_client
-    if _db_client is not None:
-        return _db_client
-
-    async with _db_lock:
-        if _db_client is not None:
-            return _db_client
-        db_path = Path(DB_PATH).expanduser().resolve()
-        if db_path.is_dir():
-            db_path = db_path / "chats.sqlite3"
-        _db_client = DBClient(db_path)
-
-    return _db_client
-
-
-__all__ = ["DBClient", "get_db_client"]
+__all__ = ["DBClient"]

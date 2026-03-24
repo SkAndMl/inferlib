@@ -203,7 +203,7 @@ wheels = [
 [[package]]
 name = "inferlib"
 version = "0.2.7"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "fastapi" },
