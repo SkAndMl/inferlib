@@ -48,6 +48,14 @@ class DBClient:
             await _conn.close()
 
     async def initialize(self):
+        if self.db_path.exists() and self.db_path.is_dir():
+            raise RuntimeError(
+                f"Database path points to a directory, expected a SQLite file: {self.db_path}"
+            )
+        if self.db_path.parent.exists() and not self.db_path.parent.is_dir():
+            raise RuntimeError(
+                f"Database parent path is not a directory: {self.db_path.parent}"
+            )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         async with self.get_connection() as conn:
             await conn.execute(CREATE_CHAT_TABLE_QUERY)

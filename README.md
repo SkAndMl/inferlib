@@ -113,6 +113,15 @@ Streaming uses SSE — set `"stream": true` and consume `data:` lines.
 inferlib serve --no-ui
 ```
 
+## Benchmarks
+
+Measured on CPU (Apple Silicon, macOS), batch of 4 sequences, ~128-token prompts, 64-token completions.
+
+| Model | Throughput |
+|-------|-----------|
+| Qwen/Qwen3-0.6B | 12.23 tok/s |
+| Qwen/Qwen3-1.7B | 5.85 tok/s |
+
 ## Learn more
 
 - [Configuration](CONFIGURATION.md) — CLI flags and environment variables

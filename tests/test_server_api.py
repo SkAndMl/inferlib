@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from inferlib.server.app import create_app
@@ -125,3 +127,20 @@ def test_chat_crud_routes_use_error_envelope(tmp_path: Path) -> None:
         not_found_response = client.get(f"/v1/chats/{chat_id}")
         assert not_found_response.status_code == 404
         assert not_found_response.json()["error"]["code"] == "chat_not_found"
+
+
+def test_startup_rejects_directory_db_path(tmp_path: Path) -> None:
+    db_dir = tmp_path / "chats.db"
+    db_dir.mkdir()
+    settings = load_settings(
+        overrides={
+            "model_class": "fake-model",
+            "db_path": str(db_dir),
+            "serve_ui": False,
+        }
+    )
+    app = create_app(settings, engine_factory=FakeServerEngine)
+
+    with pytest.raises(RuntimeError, match="Database path points to a directory"):
+        with TestClient(app):
+            pass

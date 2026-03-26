@@ -518,7 +518,9 @@ export default function App() {
       <main className={styles.main}>
         <Topbar
           isGenerating={isGenerating}
+          isMobileSidebarOpen={isMobileSidebarOpen}
           modelId={modelId}
+          onToggleSidebar={handleToggleSidebar}
           onToggleThinking={() => {
             if (!isGenerating) {
               setThinkingEnabled((current) => !current);

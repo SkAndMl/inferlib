@@ -5,6 +5,8 @@ interface TopbarProps {
   modelId: string;
   thinkingEnabled: boolean;
   isGenerating: boolean;
+  isMobileSidebarOpen: boolean;
+  onToggleSidebar: () => void;
   onToggleThinking: () => void;
 }
 
@@ -13,12 +15,23 @@ export default function Topbar({
   modelId,
   thinkingEnabled,
   isGenerating,
+  isMobileSidebarOpen,
+  onToggleSidebar,
   onToggleThinking,
 }: TopbarProps) {
   const modelLabel = modelId.includes("/") ? modelId.split("/").at(-1) ?? modelId : modelId;
 
   return (
     <header className={styles.topbar}>
+      <button
+        aria-label={isMobileSidebarOpen ? "Close sidebar" : "Open sidebar"}
+        className={styles.menuButton}
+        onClick={onToggleSidebar}
+        type="button"
+      >
+        <span aria-hidden="true" className={styles.panelIcon} />
+      </button>
+
       <div className={styles.titleGroup}>
         <div className={styles.title}>{title}</div>
         <div className={styles.subtitle}>Serving {modelLabel}</div>
