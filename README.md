@@ -1,5 +1,7 @@
 # inferlib
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/SkAndMl/inferlib)
+
 CPU-first local inference for LLMs — Python API and OpenAI-compatible server.
 
 ## Features
